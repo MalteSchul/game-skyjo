@@ -10,7 +10,7 @@ function countsByValue(deck: number[]): Map<number, number> {
 }
 
 describe('buildDeck', () => {
-  it('happy path: builds the official 150-card deck with the correct composition', () => {
+  it('builds the official 150-card deck with the correct composition', () => {
     const deck = buildDeck(42)
 
     expect(deck).toHaveLength(DECK_SIZE)
@@ -25,16 +25,16 @@ describe('buildDeck', () => {
     }
   })
 
-  it('happy path: same seed produces the same shuffle order', () => {
+  it('produces the same shuffle order for the same seed', () => {
     expect(buildDeck(7)).toEqual(buildDeck(7))
   })
 
-  it('sad path: rejects a non-number seed instead of silently producing a bad deck', () => {
+  it('rejects a non-number seed instead of silently producing a bad deck', () => {
     // @ts-expect-error intentionally passing an invalid seed type
     expect(() => buildDeck('not-a-seed')).toThrow(TypeError)
   })
 
-  it('bad path: seed=0 is a falsy value but must still be treated as a valid seed', () => {
+  it('treats seed=0 as a valid seed despite being falsy', () => {
     const deck = buildDeck(0)
 
     expect(deck).toHaveLength(150)
