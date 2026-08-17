@@ -1,0 +1,25 @@
+# Agent conventions (local-only, not shared to GitHub)
+CLAUDE.md
+
+# Node / frontend
+node_modules/
+dist/
+*.local
+
+# Python / backend
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Env files
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
