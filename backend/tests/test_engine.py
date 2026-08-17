@@ -3,8 +3,8 @@ from dataclasses import replace
 
 import pytest
 
-from skyjo.deck import DECK_SIZE
-from skyjo.engine import (
+from skyjo.domain.deck import DECK_SIZE
+from skyjo.domain.engine import (
     BOARD_SIZE,
     Action,
     ActionType,
