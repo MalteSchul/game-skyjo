@@ -1,6 +1,6 @@
 export type Card = number
 
-// TODO: duplicated in backend/src/skyjo_rl/deck.py — no shared source of truth yet.
+// TODO: duplicated in backend/src/skyjo/domain/deck.py — no shared source of truth yet.
 // Official Skyjo deck: 150 cards.
 const CARD_COUNTS: ReadonlyArray<readonly [Card, number]> = [
   [-2, 5],

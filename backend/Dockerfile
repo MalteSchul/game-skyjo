@@ -10,4 +10,4 @@ RUN uv sync --frozen --no-dev
 
 EXPOSE 8000
 
-CMD ["uv", "run", "uvicorn", "skyjo_rl.api:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uv", "run", "uvicorn", "skyjo.api:app", "--host", "0.0.0.0", "--port", "8000"]

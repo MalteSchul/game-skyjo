@@ -1,7 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="skyjo-rl")
+from skyjo.api.matches import router as matches_router
+
+app = FastAPI(title="skyjo")
 
 app.add_middleware(
     CORSMiddleware,
@@ -9,6 +11,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(matches_router)
 
 
 @app.get("/health")
