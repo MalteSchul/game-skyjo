@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="skyjo-rl")
+app = FastAPI(title="skyjo")
 
 app.add_middleware(
     CORSMiddleware,

@@ -2,7 +2,7 @@ from collections import Counter
 
 import pytest
 
-from skyjo_rl.deck import DECK_SIZE, build_deck
+from skyjo.deck import DECK_SIZE, build_deck
 
 
 def test_builds_official_150_card_deck():

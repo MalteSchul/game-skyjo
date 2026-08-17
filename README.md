@@ -22,7 +22,7 @@ npm run build     # production build
 ```sh
 cd backend
 uv sync
-uv run uvicorn skyjo_rl.api:app --reload   # dev server at http://localhost:8000
+uv run uvicorn skyjo.api:app --reload   # dev server at http://localhost:8000
 uv run pytest                              # tests
 uv run ruff check .                        # lint
 ```

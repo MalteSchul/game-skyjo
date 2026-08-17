@@ -386,7 +386,7 @@ wheels = [
 ]
 
 [[package]]
-name = "skyjo-rl"
+name = "skyjo"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

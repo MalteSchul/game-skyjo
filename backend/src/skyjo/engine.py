@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from enum import Enum, auto
 from typing import Literal
 
-from skyjo_rl.deck import build_deck
+from skyjo.deck import build_deck
 
 BOARD_SIZE = 12
 COLUMNS = 4

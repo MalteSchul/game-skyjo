@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from skyjo_rl.api import app
+from skyjo.api import app
 
 client = TestClient(app)
 
