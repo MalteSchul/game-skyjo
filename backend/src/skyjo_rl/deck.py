@@ -1,5 +1,6 @@
 import random
 
+# TODO: duplicated in frontend/src/game/deck.ts — no shared source of truth yet.
 # Official Skyjo deck: 150 cards.
 _CARD_COUNTS: tuple[tuple[int, int], ...] = (
     (-2, 5),
