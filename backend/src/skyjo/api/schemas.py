@@ -11,6 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from skyjo.api.store import Edge, MatchNode
 from skyjo.domain.engine import (
     Action,
     ActionType,
@@ -108,3 +109,52 @@ class MatchStateOut(BaseModel):
             target_score=state.target_score,
             legal_actions=[ActionOut.from_action(a) for a in legal_actions(state)],
         )
+
+
+class HistoryEdgeOut(BaseModel):
+    kind: Literal["root", "action", "next_round"]
+    action_type: ActionTypeName | None = None
+    position: int | None = None
+
+    @classmethod
+    def from_edge(cls, edge: Edge | None) -> HistoryEdgeOut:
+        if edge is None:
+            return cls(kind="root")
+        if edge.kind == "next_round":
+            return cls(kind="next_round")
+        assert edge.action is not None
+        return cls(kind="action", action_type=action_type_to_name(edge.action.type), position=edge.action.position)
+
+
+class HistoryNodeOut(BaseModel):
+    node_id: str
+    parent_id: str | None
+    seq: int
+    round_index: int
+    actor: int | None
+    current_player: int
+    phase: Phase
+    edge: HistoryEdgeOut
+
+    @classmethod
+    def from_node(cls, node: MatchNode) -> HistoryNodeOut:
+        return cls(
+            node_id=node.node_id,
+            parent_id=node.parent_id,
+            seq=node.seq,
+            round_index=node.round_index,
+            actor=node.actor,
+            current_player=node.state.current_player,
+            phase=node.state.phase,
+            edge=HistoryEdgeOut.from_edge(node.edge),
+        )
+
+
+class MatchHistoryOut(BaseModel):
+    head_id: str
+    nodes: list[HistoryNodeOut]
+
+    @classmethod
+    def from_nodes(cls, nodes: list[MatchNode], head_id: str) -> MatchHistoryOut:
+        ordered = sorted(nodes, key=lambda n: n.seq)
+        return cls(head_id=head_id, nodes=[HistoryNodeOut.from_node(n) for n in ordered])

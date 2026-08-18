@@ -46,3 +46,27 @@ export interface ActionRequest {
   type: ActionTypeName
   position?: number
 }
+
+export type HistoryEdgeKind = 'root' | 'action' | 'next_round'
+
+export interface HistoryEdgeOut {
+  kind: HistoryEdgeKind
+  action_type: ActionTypeName | null
+  position: number | null
+}
+
+export interface HistoryNodeOut {
+  node_id: string
+  parent_id: string | null
+  seq: number
+  round_index: number
+  actor: number | null
+  current_player: number
+  phase: Phase
+  edge: HistoryEdgeOut
+}
+
+export interface MatchHistoryOut {
+  head_id: string
+  nodes: HistoryNodeOut[]
+}
