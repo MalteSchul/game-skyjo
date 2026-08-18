@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, applyAction, createMatch, getMatch, startNextRound } from './matchClient'
-import type { MatchStateOut } from './types'
+import { ApiError, applyAction, createMatch, getMatch, getMatchHistory, gotoMatchHistoryNode, startNextRound } from './matchClient'
+import type { MatchHistoryOut, MatchStateOut } from './types'
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -73,5 +73,35 @@ describe('matchClient', () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed')))
 
     await expect(getMatch('abc123')).rejects.toMatchObject({ name: 'ApiError', status: 0 })
+  })
+
+  it('fetches a match history tree (happy path)', async () => {
+    const history: MatchHistoryOut = {
+      head_id: 'n1',
+      nodes: [
+        { node_id: 'n1', parent_id: null, seq: 0, round_index: 0, actor: null, current_player: 0, phase: 'initial_flip', edge: { kind: 'root', action_type: null, position: null } },
+      ],
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(history)))
+
+    await expect(getMatchHistory('abc123')).resolves.toEqual(history)
+  })
+
+  it('jumps to a history node and returns the resulting state (happy path)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(MATCH))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await gotoMatchHistoryNode('abc123', 'n1')
+
+    expect(result).toEqual(MATCH)
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('http://localhost:8000/matches/abc123/history/n1/goto')
+    expect(init.method).toBe('POST')
+  })
+
+  it('raises an ApiError when jumping to an unknown history node (sad path)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ detail: "history node 'n9' not found" }, 404)))
+
+    await expect(gotoMatchHistoryNode('abc123', 'n9')).rejects.toBeInstanceOf(ApiError)
   })
 })

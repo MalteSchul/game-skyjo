@@ -1,7 +1,7 @@
 import type { BoardOut } from '../api/types'
 import Card from './Card'
 
-const COLUMNS = 4
+export const BOARD_COLUMNS = 4
 
 interface PlayerBoardProps {
   board: BoardOut
@@ -9,10 +9,30 @@ interface PlayerBoardProps {
   isCurrentPlayer: boolean
   isFinalTurn: boolean
   clickablePositions: ReadonlySet<number>
+  rovingPosition: number | null
   onCardClick: (position: number) => void
+  onCardRef?: (position: number, el: HTMLButtonElement | null) => void
+  onCardFocus?: (position: number) => void
 }
 
-function PlayerBoard({ board, name, isCurrentPlayer, isFinalTurn, clickablePositions, onCardClick }: PlayerBoardProps) {
+/**
+ * One clickable card is a roving Tab stop (tabIndex 0), the rest are
+ * Tab-skipped; MatchView drives which one via `rovingPosition` (so arrow
+ * keys work globally, not just once focus already happens to be on this
+ * board) and this component reports focus changes back up via
+ * `onCardFocus`, so Tab/click-driven focus stays in sync too.
+ */
+function PlayerBoard({
+  board,
+  name,
+  isCurrentPlayer,
+  isFinalTurn,
+  clickablePositions,
+  rovingPosition,
+  onCardClick,
+  onCardRef,
+  onCardFocus,
+}: PlayerBoardProps) {
   const turnLabel = isFinalTurn ? 'final turn' : 'current turn'
   return (
     <section className={`player-board ${isCurrentPlayer ? 'player-board-active' : ''}`}>
@@ -28,14 +48,17 @@ function PlayerBoard({ board, name, isCurrentPlayer, isFinalTurn, clickablePosit
           </>
         )}
       </h3>
-      <div className="board-grid" style={{ gridTemplateColumns: `repeat(${COLUMNS}, auto)` }}>
+      <div className="board-grid" style={{ gridTemplateColumns: `repeat(${BOARD_COLUMNS}, auto)` }}>
         {board.cards.map((card, position) => {
           const clickable = clickablePositions.has(position)
           return (
             <Card
               key={position}
+              ref={onCardRef ? (el) => onCardRef(position, el) : undefined}
               card={card}
               onClick={clickable ? () => onCardClick(position) : undefined}
+              onFocus={clickable && onCardFocus ? () => onCardFocus(position) : undefined}
+              tabIndex={position === rovingPosition ? 0 : -1}
             />
           )
         })}

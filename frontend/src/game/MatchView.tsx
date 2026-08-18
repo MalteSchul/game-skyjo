@@ -1,8 +1,13 @@
-import { useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ActionTypeName, MatchStateOut } from '../api/types'
 import CenterPiles from './CenterPiles'
+import KeyboardHelp from './KeyboardHelp'
 import NewMatchForm from './NewMatchForm'
-import PlayerBoard from './PlayerBoard'
+import PlayerBoard, { BOARD_COLUMNS } from './PlayerBoard'
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+}
 
 function legalPositionsFor(match: MatchStateOut, type: ActionTypeName): Set<number> {
   return new Set(
@@ -48,6 +53,149 @@ function MatchView({
     () => (match ? match.legal_actions.some((a) => a.type === 'draw_discard') : false),
     [match],
   )
+  const canToggleMode = match?.phase === 'awaiting_placement' && discardRevealPositions.size > 0
+
+  // The current player's selectable cards, regardless of phase — this is
+  // also what arrow-key/roving-focus navigation operates over.
+  const activeClickablePositions = useMemo(() => {
+    if (!match) return new Set<number>()
+    if (match.phase === 'initial_flip') return flipPositions
+    if (match.phase === 'awaiting_placement') return discardMode ? discardRevealPositions : placePositions
+    return new Set<number>()
+  }, [match, discardMode, flipPositions, discardRevealPositions, placePositions])
+  const activeClickableList = useMemo(
+    () => Array.from(activeClickablePositions).sort((a, b) => a - b),
+    [activeClickablePositions],
+  )
+
+  const [helpOpen, setHelpOpen] = useState(false)
+
+  // Roving-tabindex focus cursor for the current player's board. Lives here
+  // (not inside PlayerBoard) so arrow keys can be handled as a global
+  // shortcut below — working the instant it's your turn, not only once
+  // something inside the grid already happens to have DOM focus.
+  const buttonRefs = useRef(new Map<number, HTMLButtonElement>())
+  const [rovingPosition, setRovingPosition] = useState<number | null>(null)
+  // Position numbers are per-board-local (0-11), not globally unique, so a
+  // roving position surviving a turn change could coincidentally still be
+  // "valid" on the new current player's board while actually pointing at a
+  // different card. Track whose turn the roving position belongs to so a
+  // player change always forces a re-focus, never just a position check.
+  const rovingPlayerRef = useRef<number | null>(null)
+
+  // Auto-focus the first available card whenever it becomes (or stops
+  // being) your turn — including right when the match starts. Without this,
+  // arrow keys would need a prior Tab press to "enter" the grid, and
+  // disabling the previous target's button also blurs it, so focus would
+  // otherwise drop out of the grid after every single action.
+  useEffect(() => {
+    const samePlayer = rovingPlayerRef.current === (match?.current_player ?? null)
+    if (samePlayer && rovingPosition !== null && activeClickablePositions.has(rovingPosition)) return
+    rovingPlayerRef.current = match?.current_player ?? null
+    const next = activeClickableList[0] ?? null
+    setRovingPosition(next)
+    if (next !== null) buttonRefs.current.get(next)?.focus()
+  }, [match, activeClickableList, activeClickablePositions, rovingPosition])
+
+  const moveFocus = useCallback(
+    (dCol: number, dRow: number) => {
+      if (!match || activeClickableList.length === 0) return
+      const totalCards = match.boards[match.current_player].cards.length
+      const rows = Math.ceil(totalCards / BOARD_COLUMNS)
+      let position = rovingPosition ?? activeClickableList[0]
+      for (let step = 0; step < totalCards; step++) {
+        const row = Math.floor(position / BOARD_COLUMNS)
+        const col = position % BOARD_COLUMNS
+        const nextRow = (row + dRow + rows) % rows
+        const nextCol = (col + dCol + BOARD_COLUMNS) % BOARD_COLUMNS
+        position = nextRow * BOARD_COLUMNS + nextCol
+        if (activeClickablePositions.has(position)) {
+          setRovingPosition(position)
+          buttonRefs.current.get(position)?.focus()
+          return
+        }
+      }
+    },
+    [match, activeClickableList, activeClickablePositions, rovingPosition],
+  )
+
+  // Global one-key shortcuts for everything a turn can do: drawing, the
+  // place/discard-reveal mode toggle, round transitions, and moving the
+  // roving-focus cursor between cards.
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (!match || event.ctrlKey || event.metaKey || event.altKey || isTypingTarget(event.target)) return
+
+      if (event.key === '?') {
+        event.preventDefault()
+        setHelpOpen((open) => !open)
+        return
+      }
+      if (helpOpen) {
+        if (event.key === 'Escape') setHelpOpen(false)
+        return
+      }
+      if (busy) return
+
+      switch (event.key) {
+        case 'ArrowUp':
+          event.preventDefault()
+          moveFocus(0, -1)
+          return
+        case 'ArrowDown':
+          event.preventDefault()
+          moveFocus(0, 1)
+          return
+        case 'ArrowLeft':
+          event.preventDefault()
+          moveFocus(-1, 0)
+          return
+        case 'ArrowRight':
+          event.preventDefault()
+          moveFocus(1, 0)
+          return
+        default:
+          break
+      }
+
+      switch (event.key.toLowerCase()) {
+        case 's':
+          if (canDrawStock) onDrawStock()
+          break
+        case 'd':
+          if (canDrawDiscard) onDrawDiscard()
+          break
+        case 'm':
+          if (canToggleMode) onSetDiscardMode(!discardMode)
+          break
+        case 'n':
+          if (match.phase === 'round_over') onNextRound()
+          break
+        case 'p':
+          if (match.phase === 'game_over') onPlayAgain()
+          break
+        default:
+          break
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [
+    match,
+    busy,
+    helpOpen,
+    canDrawStock,
+    canDrawDiscard,
+    canToggleMode,
+    discardMode,
+    moveFocus,
+    onDrawStock,
+    onDrawDiscard,
+    onSetDiscardMode,
+    onNextRound,
+    onPlayAgain,
+  ])
 
   if (!match) {
     return (
@@ -61,6 +209,13 @@ function MatchView({
   return (
     <div className="match-view">
       {error && <p className="error-banner">{error}</p>}
+
+      <div className="match-toolbar">
+        <button type="button" className="shortcuts-trigger" onClick={() => setHelpOpen(true)}>
+          ⌨ Shortcuts <kbd>?</kbd>
+        </button>
+      </div>
+      <KeyboardHelp open={helpOpen} onClose={() => setHelpOpen(false)} />
 
       <CenterPiles
         stockCount={match.stock_count}
@@ -106,20 +261,26 @@ function MatchView({
 
       <div className="boards">
         {match.boards.map((board, playerIndex) => {
-          let clickable = new Set<number>()
-          if (playerIndex === match.current_player) {
-            if (match.phase === 'initial_flip') clickable = flipPositions
-            else if (match.phase === 'awaiting_placement') clickable = discardMode ? discardRevealPositions : placePositions
-          }
+          const isCurrent = playerIndex === match.current_player
           return (
             <PlayerBoard
               key={playerIndex}
               board={board}
               name={match.player_names[playerIndex]}
-              isCurrentPlayer={playerIndex === match.current_player}
+              isCurrentPlayer={isCurrent}
               isFinalTurn={match.finisher !== null}
-              clickablePositions={clickable}
+              clickablePositions={isCurrent ? activeClickablePositions : new Set<number>()}
+              rovingPosition={isCurrent ? rovingPosition : null}
               onCardClick={(position) => onCardClick(playerIndex, position)}
+              onCardRef={
+                isCurrent
+                  ? (position, el) => {
+                      if (el) buttonRefs.current.set(position, el)
+                      else buttonRefs.current.delete(position)
+                    }
+                  : undefined
+              }
+              onCardFocus={isCurrent ? (position) => setRovingPosition(position) : undefined}
             />
           )
         })}

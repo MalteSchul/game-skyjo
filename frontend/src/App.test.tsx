@@ -2,19 +2,21 @@ import { fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from './api/matchClient'
 import { loadStoredMatchId, storeMatchId } from './api/matchStorage'
-import type { MatchStateOut } from './api/types'
+import type { MatchHistoryOut, MatchStateOut } from './api/types'
 import App from './App'
 
-const { createMatch, applyAction, startNextRound, getMatch } = vi.hoisted(() => ({
+const { createMatch, applyAction, startNextRound, getMatch, getMatchHistory, gotoMatchHistoryNode } = vi.hoisted(() => ({
   createMatch: vi.fn(),
   applyAction: vi.fn(),
   startNextRound: vi.fn(),
   getMatch: vi.fn(),
+  getMatchHistory: vi.fn(),
+  gotoMatchHistoryNode: vi.fn(),
 }))
 
 vi.mock('./api/matchClient', async () => {
   const actual = await vi.importActual<typeof import('./api/matchClient')>('./api/matchClient')
-  return { ...actual, createMatch, applyAction, startNextRound, getMatch }
+  return { ...actual, createMatch, applyAction, startNextRound, getMatch, getMatchHistory, gotoMatchHistoryNode }
 })
 
 const INITIAL_FLIP_MATCH: MatchStateOut = {
@@ -46,11 +48,30 @@ const AWAITING_DRAW_MATCH: MatchStateOut = {
   ],
 }
 
+const ROOT_ONLY_HISTORY: MatchHistoryOut = {
+  head_id: 'root',
+  nodes: [
+    {
+      node_id: 'root',
+      parent_id: null,
+      seq: 0,
+      round_index: 0,
+      actor: null,
+      current_player: 0,
+      phase: 'initial_flip',
+      edge: { kind: 'root', action_type: null, position: null },
+    },
+  ],
+}
+
 beforeEach(() => {
   createMatch.mockReset()
   applyAction.mockReset()
   startNextRound.mockReset()
   getMatch.mockReset()
+  getMatchHistory.mockReset()
+  gotoMatchHistoryNode.mockReset()
+  getMatchHistory.mockResolvedValue(ROOT_ONLY_HISTORY)
   localStorage.clear()
   // The health check in App's useEffect hits the real `fetch`, not matchClient
   // — stub it so tests don't make a real network call or race on its result.
@@ -161,5 +182,93 @@ describe('App', () => {
 
     expect(screen.getByRole('button', { name: 'Start match' })).toBeInTheDocument()
     expect(loadStoredMatchId()).toBeNull()
+  })
+
+  it('loads and shows the match history sidebar once a match starts (happy path)', async () => {
+    createMatch.mockResolvedValue(INITIAL_FLIP_MATCH)
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
+
+    expect(await screen.findByText('Game start')).toBeInTheDocument()
+    expect(getMatchHistory).toHaveBeenCalledWith('m1')
+  })
+
+  it('jumps to a past history node when clicked (happy path)', async () => {
+    createMatch.mockResolvedValue(INITIAL_FLIP_MATCH)
+    applyAction.mockResolvedValue(AWAITING_DRAW_MATCH)
+    gotoMatchHistoryNode.mockResolvedValue(INITIAL_FLIP_MATCH)
+    // First fetch (right after creation) has the root as the head; the second
+    // (after the flip action) has moved the head to a new leaf, so "Game
+    // start" becomes a clickable past entry instead of the disabled head.
+    getMatchHistory.mockResolvedValueOnce(ROOT_ONLY_HISTORY).mockResolvedValueOnce({
+      head_id: 'flip0',
+      nodes: [
+        ...ROOT_ONLY_HISTORY.nodes,
+        {
+          node_id: 'flip0',
+          parent_id: 'root',
+          seq: 1,
+          round_index: 0,
+          actor: 0,
+          current_player: 1,
+          phase: 'awaiting_draw',
+          edge: { kind: 'action', action_type: 'flip_initial', position: 0 },
+        },
+      ],
+    })
+    render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
+    await screen.findByRole('heading', { name: /Player 1/ })
+    fireEvent.click(screen.getAllByRole('button', { name: 'face-down card' })[0])
+    await screen.findByText('Player 1 flipped card 1')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Game start' }))
+
+    expect(gotoMatchHistoryNode).toHaveBeenCalledWith('m1', 'root')
+    expect(getMatchHistory).toHaveBeenLastCalledWith('m1')
+  })
+
+  it('shows the backend error message when jumping to history fails (sad path)', async () => {
+    createMatch.mockResolvedValue(INITIAL_FLIP_MATCH)
+    applyAction.mockResolvedValue(AWAITING_DRAW_MATCH)
+    gotoMatchHistoryNode.mockRejectedValue(new ApiError(404, 'history node not found'))
+    getMatchHistory.mockResolvedValueOnce(ROOT_ONLY_HISTORY).mockResolvedValueOnce({
+      head_id: 'flip0',
+      nodes: [
+        ...ROOT_ONLY_HISTORY.nodes,
+        {
+          node_id: 'flip0',
+          parent_id: 'root',
+          seq: 1,
+          round_index: 0,
+          actor: 0,
+          current_player: 1,
+          phase: 'awaiting_draw',
+          edge: { kind: 'action', action_type: 'flip_initial', position: 0 },
+        },
+      ],
+    })
+    render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
+    await screen.findByRole('heading', { name: /Player 1/ })
+    fireEvent.click(screen.getAllByRole('button', { name: 'face-down card' })[0])
+    await screen.findByText('Player 1 flipped card 1')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Game start' }))
+
+    expect(await screen.findByText('history node not found')).toBeInTheDocument()
+  })
+
+  it('still renders the board when the history fetch fails, leaving the sidebar empty (bad path)', async () => {
+    createMatch.mockResolvedValue(INITIAL_FLIP_MATCH)
+    getMatchHistory.mockReset()
+    getMatchHistory.mockRejectedValue(new Error('boom'))
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
+
+    expect(await screen.findByRole('heading', { name: /Player 1/ })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Match history')).not.toBeInTheDocument()
   })
 })

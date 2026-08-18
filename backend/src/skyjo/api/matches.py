@@ -2,13 +2,15 @@ from fastapi import APIRouter, HTTPException
 
 from skyjo.api.schemas import (
     ActionRequest,
+    MatchHistoryOut,
     MatchStateOut,
     NewMatchRequest,
     action_type_from_name,
 )
-from skyjo.api.store import MatchNotFoundError, MatchRecord, MatchStore
+from skyjo.api.store import MatchNode, MatchNotFoundError, MatchStore, NodeNotFoundError
 from skyjo.domain.engine import (
     Action,
+    GameState,
     IllegalActionError,
     apply_action,
     new_match,
@@ -33,40 +35,62 @@ def create_match(request: NewMatchRequest) -> MatchStateOut:
 
 @router.get("/{match_id}", response_model=MatchStateOut)
 def get_match(match_id: str) -> MatchStateOut:
-    record = _get_record_or_404(match_id)
-    return MatchStateOut.from_state(match_id, record.state, record.player_names)
+    node, player_names = _get_head_or_404(match_id)
+    return MatchStateOut.from_state(match_id, node.state, player_names)
 
 
 @router.post("/{match_id}/actions", response_model=MatchStateOut)
 def apply_match_action(match_id: str, request: ActionRequest) -> MatchStateOut:
-    record = _get_record_or_404(match_id)
+    _get_head_or_404(match_id)
     action = Action(type=action_type_from_name(request.type), position=request.position)
 
+    def compute(state: GameState) -> GameState:
+        return apply_action(state, action)
+
     try:
-        new_state = apply_action(record.state, action)
+        node, player_names = store.apply_action(match_id, action, compute)
     except IllegalActionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    store.update(match_id, new_state)
-    return MatchStateOut.from_state(match_id, new_state, record.player_names)
+    return MatchStateOut.from_state(match_id, node.state, player_names)
 
 
 @router.post("/{match_id}/next-round", response_model=MatchStateOut)
 def start_match_next_round(match_id: str) -> MatchStateOut:
-    record = _get_record_or_404(match_id)
+    _get_head_or_404(match_id)
 
     try:
-        new_state = start_next_round(record.state)
+        node, player_names = store.start_next_round(match_id, start_next_round)
     except IllegalActionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    store.update(match_id, new_state)
-    return MatchStateOut.from_state(match_id, new_state, record.player_names)
+    return MatchStateOut.from_state(match_id, node.state, player_names)
 
 
-def _get_record_or_404(match_id: str) -> MatchRecord:
+@router.get("/{match_id}/history", response_model=MatchHistoryOut)
+def get_match_history(match_id: str) -> MatchHistoryOut:
     try:
-        return store.get(match_id)
+        nodes, head_id, _ = store.get_history(match_id)
+    except MatchNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"match {match_id!r} not found") from exc
+    return MatchHistoryOut.from_nodes(nodes, head_id)
+
+
+@router.post("/{match_id}/history/{node_id}/goto", response_model=MatchStateOut)
+def goto_match_history_node(match_id: str, node_id: str) -> MatchStateOut:
+    try:
+        node, player_names = store.goto(match_id, node_id)
+    except MatchNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"match {match_id!r} not found") from exc
+    except NodeNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"history node {node_id!r} not found") from exc
+
+    return MatchStateOut.from_state(match_id, node.state, player_names)
+
+
+def _get_head_or_404(match_id: str) -> tuple[MatchNode, tuple[str, ...]]:
+    try:
+        return store.get_head(match_id)
     except MatchNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"match {match_id!r} not found") from exc
 

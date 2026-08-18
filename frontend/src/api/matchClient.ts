@@ -1,4 +1,4 @@
-import type { ActionRequest, MatchStateOut, NewMatchRequest } from './types'
+import type { ActionRequest, MatchHistoryOut, MatchStateOut, NewMatchRequest } from './types'
 
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
 
@@ -52,4 +52,12 @@ export function applyAction(matchId: string, action: ActionRequest): Promise<Mat
 
 export function startNextRound(matchId: string): Promise<MatchStateOut> {
   return apiRequest<MatchStateOut>(`/matches/${matchId}/next-round`, { method: 'POST' })
+}
+
+export function getMatchHistory(matchId: string): Promise<MatchHistoryOut> {
+  return apiRequest<MatchHistoryOut>(`/matches/${matchId}/history`)
+}
+
+export function gotoMatchHistoryNode(matchId: string, nodeId: string): Promise<MatchStateOut> {
+  return apiRequest<MatchStateOut>(`/matches/${matchId}/history/${nodeId}/goto`, { method: 'POST' })
 }

@@ -21,6 +21,7 @@ describe('PlayerBoard', () => {
         isCurrentPlayer
         isFinalTurn={false}
         clickablePositions={new Set([0])}
+        rovingPosition={0}
         onCardClick={onCardClick}
       />,
     )
@@ -39,6 +40,7 @@ describe('PlayerBoard', () => {
         isCurrentPlayer={false}
         isFinalTurn={false}
         clickablePositions={new Set()}
+        rovingPosition={null}
         onCardClick={onCardClick}
       />,
     )
@@ -57,6 +59,7 @@ describe('PlayerBoard', () => {
         isCurrentPlayer
         isFinalTurn={false}
         clickablePositions={new Set([0])}
+        rovingPosition={0}
         onCardClick={vi.fn()}
       />,
     )
@@ -72,6 +75,7 @@ describe('PlayerBoard', () => {
         isCurrentPlayer
         isFinalTurn={false}
         clickablePositions={new Set()}
+        rovingPosition={null}
         onCardClick={vi.fn()}
       />,
     )
@@ -87,11 +91,88 @@ describe('PlayerBoard', () => {
         isCurrentPlayer
         isFinalTurn
         clickablePositions={new Set()}
+        rovingPosition={null}
         onCardClick={vi.fn()}
       />,
     )
 
     expect(screen.getByRole('heading', { name: /Grace \(final turn\)/ })).toBeInTheDocument()
     expect(screen.queryByText('Current turn')).not.toBeInTheDocument()
+  })
+
+  it('gives only the card matching rovingPosition a tabindex of 0, and the other clickable cards -1 (happy path)', () => {
+    const board = boardWith([
+      { value: null, face_up: false },
+      { value: null, face_up: false },
+      { value: null, face_up: false },
+    ])
+    render(
+      <PlayerBoard
+        board={board}
+        name="Ada"
+        isCurrentPlayer
+        isFinalTurn={false}
+        clickablePositions={new Set([0, 1, 2])}
+        rovingPosition={1}
+        onCardClick={vi.fn()}
+      />,
+    )
+    const buttons = screen.getAllByRole('button')
+
+    expect(buttons[0]).toHaveAttribute('tabindex', '-1')
+    expect(buttons[1]).toHaveAttribute('tabindex', '0')
+    expect(buttons[2]).toHaveAttribute('tabindex', '-1')
+  })
+
+  it('reports which position gained focus via onCardFocus, only for clickable cards (happy path)', () => {
+    const onCardFocus = vi.fn()
+    const board = boardWith([{ value: null, face_up: false }])
+    render(
+      <PlayerBoard
+        board={board}
+        name="Ada"
+        isCurrentPlayer
+        isFinalTurn={false}
+        clickablePositions={new Set([0])}
+        rovingPosition={0}
+        onCardClick={vi.fn()}
+        onCardFocus={onCardFocus}
+      />,
+    )
+
+    screen.getByRole('button').focus()
+
+    expect(onCardFocus).toHaveBeenCalledWith(0)
+  })
+
+  it('registers and clears button refs via onCardRef as cards mount and unmount (sad path)', () => {
+    const onCardRef = vi.fn()
+    const { rerender } = render(
+      <PlayerBoard
+        board={boardWith([{ value: null, face_up: false }])}
+        name="Ada"
+        isCurrentPlayer
+        isFinalTurn={false}
+        clickablePositions={new Set([0])}
+        rovingPosition={0}
+        onCardClick={vi.fn()}
+        onCardRef={onCardRef}
+      />,
+    )
+    expect(onCardRef).toHaveBeenCalledWith(0, expect.any(HTMLButtonElement))
+
+    rerender(
+      <PlayerBoard
+        board={boardWith([null])}
+        name="Ada"
+        isCurrentPlayer
+        isFinalTurn={false}
+        clickablePositions={new Set()}
+        rovingPosition={null}
+        onCardClick={vi.fn()}
+        onCardRef={onCardRef}
+      />,
+    )
+    expect(onCardRef).toHaveBeenCalledWith(0, null)
   })
 })
