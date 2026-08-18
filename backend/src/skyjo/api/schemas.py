@@ -6,6 +6,7 @@ only place that needs to hide information, so it lives here rather than in the e
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Literal
 
 from pydantic import BaseModel
@@ -37,6 +38,9 @@ def action_type_to_name(action_type: ActionType) -> str:
 class NewMatchRequest(BaseModel):
     player_count: int
     seed: int | None = None
+    # One name per player, in seat order. Omitted or blank entries fall back to
+    # "Player N" — see api.matches._resolve_player_names.
+    player_names: list[str] | None = None
 
 
 class ActionRequest(BaseModel):
@@ -74,6 +78,7 @@ class MatchStateOut(BaseModel):
     match_id: str
     phase: Phase
     boards: list[BoardOut]
+    player_names: list[str]
     stock_count: int
     discard_top: int | None
     current_player: int
@@ -86,11 +91,12 @@ class MatchStateOut(BaseModel):
     legal_actions: list[ActionOut]
 
     @classmethod
-    def from_state(cls, match_id: str, state: GameState) -> MatchStateOut:
+    def from_state(cls, match_id: str, state: GameState, player_names: Sequence[str]) -> MatchStateOut:
         return cls(
             match_id=match_id,
             phase=state.phase,
             boards=[BoardOut.from_board(b) for b in state.boards],
+            player_names=list(player_names),
             stock_count=len(state.stock),
             discard_top=state.discard[-1] if state.discard else None,
             current_player=state.current_player,

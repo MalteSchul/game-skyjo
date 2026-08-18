@@ -1,0 +1,55 @@
+import type { ActionRequest, MatchStateOut, NewMatchRequest } from './types'
+
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
+
+/** Thrown for any non-2xx response; `detail` is FastAPI's error body message, when present. */
+export class ApiError extends Error {
+  readonly status: number
+
+  constructor(status: number, detail: string) {
+    super(detail)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
+async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  let response: Response
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+      headers: { 'Content-Type': 'application/json', ...init?.headers },
+    })
+  } catch {
+    throw new ApiError(0, 'Could not reach the server. Check your connection and try again.')
+  }
+
+  if (!response.ok) {
+    const detail = await response
+      .json()
+      .then((body) => (typeof body?.detail === 'string' ? body.detail : response.statusText))
+      .catch(() => response.statusText)
+    throw new ApiError(response.status, detail)
+  }
+
+  return response.json() as Promise<T>
+}
+
+export function createMatch(newMatch: NewMatchRequest): Promise<MatchStateOut> {
+  return apiRequest<MatchStateOut>('/matches', { method: 'POST', body: JSON.stringify(newMatch) })
+}
+
+export function getMatch(matchId: string): Promise<MatchStateOut> {
+  return apiRequest<MatchStateOut>(`/matches/${matchId}`)
+}
+
+export function applyAction(matchId: string, action: ActionRequest): Promise<MatchStateOut> {
+  return apiRequest<MatchStateOut>(`/matches/${matchId}/actions`, {
+    method: 'POST',
+    body: JSON.stringify(action),
+  })
+}
+
+export function startNextRound(matchId: string): Promise<MatchStateOut> {
+  return apiRequest<MatchStateOut>(`/matches/${matchId}/next-round`, { method: 'POST' })
+}

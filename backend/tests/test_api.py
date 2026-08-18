@@ -46,6 +46,34 @@ def test_create_match_rejects_malformed_body():
     assert response.status_code == 422
 
 
+def test_create_match_without_names_defaults_to_player_n():
+    response = client.post("/matches", json={"player_count": 3})
+
+    assert response.json()["player_names"] == ["Player 1", "Player 2", "Player 3"]
+
+
+def test_create_match_uses_the_given_player_names():
+    response = client.post(
+        "/matches", json={"player_count": 2, "player_names": ["Ada", "Grace"]}
+    )
+
+    assert response.json()["player_names"] == ["Ada", "Grace"]
+
+
+def test_create_match_falls_back_to_default_for_a_blank_name():
+    response = client.post("/matches", json={"player_count": 2, "player_names": ["Ada", "  "]})
+
+    assert response.json()["player_names"] == ["Ada", "Player 2"]
+
+
+def test_create_match_rejects_a_player_names_length_mismatch():
+    response = client.post(
+        "/matches", json={"player_count": 3, "player_names": ["Ada", "Grace"]}
+    )
+
+    assert response.status_code == 400
+
+
 # --- GET /matches/{id} ----------------------------------------------------------
 
 
@@ -65,6 +93,18 @@ def test_get_match_with_unknown_id_returns_404():
 
 
 # --- POST /matches/{id}/actions --------------------------------------------------
+
+
+def test_action_response_keeps_the_player_names_from_creation():
+    created = client.post(
+        "/matches", json={"player_count": 2, "seed": 7, "player_names": ["Ada", "Grace"]}
+    ).json()
+
+    response = client.post(
+        f"/matches/{created['match_id']}/actions", json={"type": "flip_initial", "position": 0}
+    )
+
+    assert response.json()["player_names"] == ["Ada", "Grace"]
 
 
 def test_flip_initial_action_reveals_a_card_and_advances_the_turn():
