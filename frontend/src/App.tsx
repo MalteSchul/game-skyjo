@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { ApiError, API_BASE_URL, applyAction, createMatch, startNextRound } from './api/matchClient'
+import { ApiError, API_BASE_URL, applyAction, createMatch, getMatch, startNextRound } from './api/matchClient'
+import { clearStoredMatchId, loadStoredMatchId, storeMatchId } from './api/matchStorage'
 import type { ActionTypeName, MatchStateOut } from './api/types'
 import MatchView from './game/MatchView'
 import Scoreboard from './game/Scoreboard'
@@ -11,6 +12,9 @@ function App() {
   const [match, setMatch] = useState<MatchStateOut | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // True while we're trying to reload a match remembered from a previous
+  // visit, so we don't flash the "start a new match" form before it resolves.
+  const [restoring, setRestoring] = useState(() => loadStoredMatchId() !== null)
   // When set, the next click on a face-down card discards the drawn card and
   // reveals that one instead of placing the drawn card there.
   const [discardMode, setDiscardMode] = useState(false)
@@ -19,6 +23,16 @@ function App() {
     fetch(`${API_BASE_URL}/health`)
       .then((res) => setStatus(res.ok ? 'online' : 'offline'))
       .catch(() => setStatus('offline'))
+  }, [])
+
+  useEffect(() => {
+    const storedMatchId = loadStoredMatchId()
+    if (!storedMatchId) return
+
+    getMatch(storedMatchId)
+      .then(setMatch)
+      .catch(() => clearStoredMatchId())
+      .finally(() => setRestoring(false))
   }, [])
 
   async function runAction(action: { type: ActionTypeName; position?: number }) {
@@ -42,11 +56,18 @@ function App() {
     try {
       const created = await createMatch({ player_count: playerCount, seed, player_names: playerNames })
       setMatch(created)
+      storeMatchId(created.match_id)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Something went wrong.')
     } finally {
       setBusy(false)
     }
+  }
+
+  function handlePlayAgain() {
+    clearStoredMatchId()
+    setMatch(null)
+    setError(null)
   }
 
   async function handleNextRound() {
@@ -88,6 +109,8 @@ function App() {
           <p role="alert" className="error-banner">
             Backend unreachable — start it and reload.
           </p>
+        ) : restoring ? (
+          <p>Restoring your match…</p>
         ) : (
           <MatchView
             match={match}
@@ -100,6 +123,7 @@ function App() {
             onSetDiscardMode={setDiscardMode}
             onCardClick={handleCardClick}
             onNextRound={handleNextRound}
+            onPlayAgain={handlePlayAgain}
           />
         )}
       </main>

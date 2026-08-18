@@ -21,6 +21,7 @@ interface MatchViewProps {
   onSetDiscardMode: (discardMode: boolean) => void
   onCardClick: (playerIndex: number, position: number) => void
   onNextRound: () => void
+  onPlayAgain: () => void
 }
 
 function MatchView({
@@ -34,6 +35,7 @@ function MatchView({
   onSetDiscardMode,
   onCardClick,
   onNextRound,
+  onPlayAgain,
 }: MatchViewProps) {
   const placePositions = useMemo(() => (match ? legalPositionsFor(match, 'place') : new Set<number>()), [match])
   const discardRevealPositions = useMemo(
@@ -96,6 +98,9 @@ function MatchView({
           <p className="winner-line">
             Winner: <strong>{match.player_names[match.total_scores.indexOf(Math.min(...match.total_scores))]}</strong>
           </p>
+          <button type="button" className="btn-primary" onClick={onPlayAgain}>
+            Play again
+          </button>
         </div>
       )}
 

@@ -41,6 +41,7 @@ describe('MatchView', () => {
         onSetDiscardMode={noop}
         onCardClick={noop}
         onNextRound={noop}
+        onPlayAgain={noop}
       />,
     )
 
@@ -63,6 +64,7 @@ describe('MatchView', () => {
         onSetDiscardMode={noop}
         onCardClick={onCardClick}
         onNextRound={noop}
+        onPlayAgain={noop}
       />,
     )
 
@@ -94,6 +96,7 @@ describe('MatchView', () => {
         onSetDiscardMode={onSetDiscardMode}
         onCardClick={noop}
         onNextRound={noop}
+        onPlayAgain={noop}
       />,
     )
 
@@ -126,6 +129,7 @@ describe('MatchView', () => {
         onSetDiscardMode={noop}
         onCardClick={noop}
         onNextRound={noop}
+        onPlayAgain={noop}
       />,
     )
 
@@ -146,6 +150,7 @@ describe('MatchView', () => {
         onSetDiscardMode={noop}
         onCardClick={noop}
         onNextRound={noop}
+        onPlayAgain={noop}
       />,
     )
 
@@ -166,6 +171,7 @@ describe('MatchView', () => {
         onSetDiscardMode={noop}
         onCardClick={noop}
         onNextRound={noop}
+        onPlayAgain={noop}
       />,
     )
 
@@ -187,6 +193,7 @@ describe('MatchView', () => {
         onSetDiscardMode={noop}
         onCardClick={noop}
         onNextRound={onNextRound}
+        onPlayAgain={noop}
       />,
     )
 
@@ -204,10 +211,35 @@ describe('MatchView', () => {
         onSetDiscardMode={noop}
         onCardClick={noop}
         onNextRound={onNextRound}
+        onPlayAgain={noop}
       />,
     )
     fireEvent.click(screen.getByRole('button', { name: 'Start next round' }))
 
     expect(onNextRound).toHaveBeenCalledTimes(1)
+  })
+
+  it('calls onPlayAgain when "Play again" is clicked after game_over (happy path)', () => {
+    const onPlayAgain = vi.fn()
+    const match: MatchStateOut = { ...BASE_MATCH, phase: 'game_over', total_scores: [42, 17] }
+    render(
+      <MatchView
+        match={match}
+        error={null}
+        busy={false}
+        discardMode={false}
+        onCreate={noop}
+        onDrawStock={noop}
+        onDrawDiscard={noop}
+        onSetDiscardMode={noop}
+        onCardClick={noop}
+        onNextRound={noop}
+        onPlayAgain={onPlayAgain}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Play again' }))
+
+    expect(onPlayAgain).toHaveBeenCalledTimes(1)
   })
 })
