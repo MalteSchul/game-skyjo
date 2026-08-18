@@ -21,6 +21,7 @@ describe('PlayerBoard', () => {
         isCurrentPlayer
         isFinalTurn={false}
         clickablePositions={new Set([0])}
+        rovingPosition={0}
         onCardClick={onCardClick}
       />,
     )
@@ -39,6 +40,7 @@ describe('PlayerBoard', () => {
         isCurrentPlayer={false}
         isFinalTurn={false}
         clickablePositions={new Set()}
+        rovingPosition={null}
         onCardClick={onCardClick}
       />,
     )
@@ -57,6 +59,7 @@ describe('PlayerBoard', () => {
         isCurrentPlayer
         isFinalTurn={false}
         clickablePositions={new Set([0])}
+        rovingPosition={0}
         onCardClick={vi.fn()}
       />,
     )
@@ -72,6 +75,7 @@ describe('PlayerBoard', () => {
         isCurrentPlayer
         isFinalTurn={false}
         clickablePositions={new Set()}
+        rovingPosition={null}
         onCardClick={vi.fn()}
       />,
     )
@@ -87,6 +91,7 @@ describe('PlayerBoard', () => {
         isCurrentPlayer
         isFinalTurn
         clickablePositions={new Set()}
+        rovingPosition={null}
         onCardClick={vi.fn()}
       />,
     )
@@ -95,77 +100,79 @@ describe('PlayerBoard', () => {
     expect(screen.queryByText('Current turn')).not.toBeInTheDocument()
   })
 
-  function twelveFaceDownCards(): BoardOut['cards'] {
-    return Array.from({ length: 12 }, () => ({ value: null, face_up: false }))
-  }
-
-  it('gives the first clickable card the roving tabindex, and moves it with the arrow keys, skipping unavailable cards (happy path)', () => {
-    const { container } = render(
+  it('gives only the card matching rovingPosition a tabindex of 0, and the other clickable cards -1 (happy path)', () => {
+    const board = boardWith([
+      { value: null, face_up: false },
+      { value: null, face_up: false },
+      { value: null, face_up: false },
+    ])
+    render(
       <PlayerBoard
-        board={boardWith(twelveFaceDownCards())}
+        board={board}
         name="Ada"
         isCurrentPlayer
         isFinalTurn={false}
-        clickablePositions={new Set([0, 2, 5, 6, 9])}
+        clickablePositions={new Set([0, 1, 2])}
+        rovingPosition={1}
         onCardClick={vi.fn()}
       />,
     )
     const buttons = screen.getAllByRole('button')
-    expect(buttons[0]).toHaveAttribute('tabindex', '0')
-    expect(buttons[2]).toHaveAttribute('tabindex', '-1')
 
-    const grid = container.querySelector('.board-grid')!
-
-    // Row 0: [0 x x x] -> ArrowRight skips position 1 (not clickable) to land on 2.
-    fireEvent.keyDown(grid, { key: 'ArrowRight' })
-    expect(document.activeElement).toBe(buttons[2])
-    expect(buttons[2]).toHaveAttribute('tabindex', '0')
     expect(buttons[0]).toHaveAttribute('tabindex', '-1')
-
-    // Column 2, row 1 (position 6) is clickable directly below position 2.
-    fireEvent.keyDown(grid, { key: 'ArrowDown' })
-    expect(document.activeElement).toBe(buttons[6])
-
-    // Position 5 is directly to the left of 6, and is clickable.
-    fireEvent.keyDown(grid, { key: 'ArrowLeft' })
-    expect(document.activeElement).toBe(buttons[5])
+    expect(buttons[1]).toHaveAttribute('tabindex', '0')
+    expect(buttons[2]).toHaveAttribute('tabindex', '-1')
   })
 
-  it('wraps focus around the grid edges back to a clickable card (happy path)', () => {
-    const { container } = render(
+  it('reports which position gained focus via onCardFocus, only for clickable cards (happy path)', () => {
+    const onCardFocus = vi.fn()
+    const board = boardWith([{ value: null, face_up: false }])
+    render(
       <PlayerBoard
-        board={boardWith(twelveFaceDownCards())}
+        board={board}
         name="Ada"
         isCurrentPlayer
         isFinalTurn={false}
-        clickablePositions={new Set([0, 8])}
+        clickablePositions={new Set([0])}
+        rovingPosition={0}
         onCardClick={vi.fn()}
+        onCardFocus={onCardFocus}
       />,
     )
-    const buttons = screen.getAllByRole('button')
-    const grid = container.querySelector('.board-grid')!
 
-    // Position 0 is the top-left cell (row 0); pressing Up wraps to row 2, same column.
-    fireEvent.keyDown(grid, { key: 'ArrowUp' })
-    expect(document.activeElement).toBe(buttons[8])
+    screen.getByRole('button').focus()
+
+    expect(onCardFocus).toHaveBeenCalledWith(0)
   })
 
-  it('does nothing on arrow keys when the board has no clickable cards (sad path)', () => {
-    const { container } = render(
+  it('registers and clears button refs via onCardRef as cards mount and unmount (sad path)', () => {
+    const onCardRef = vi.fn()
+    const { rerender } = render(
       <PlayerBoard
-        board={boardWith(twelveFaceDownCards())}
+        board={boardWith([{ value: null, face_up: false }])}
         name="Ada"
-        isCurrentPlayer={false}
+        isCurrentPlayer
+        isFinalTurn={false}
+        clickablePositions={new Set([0])}
+        rovingPosition={0}
+        onCardClick={vi.fn()}
+        onCardRef={onCardRef}
+      />,
+    )
+    expect(onCardRef).toHaveBeenCalledWith(0, expect.any(HTMLButtonElement))
+
+    rerender(
+      <PlayerBoard
+        board={boardWith([null])}
+        name="Ada"
+        isCurrentPlayer
         isFinalTurn={false}
         clickablePositions={new Set()}
+        rovingPosition={null}
         onCardClick={vi.fn()}
+        onCardRef={onCardRef}
       />,
     )
-    const grid = container.querySelector('.board-grid')!
-
-    expect(() => fireEvent.keyDown(grid, { key: 'ArrowRight' })).not.toThrow()
-    for (const button of screen.getAllByRole('button')) {
-      expect(button).not.toHaveAttribute('tabindex', '0')
-    }
+    expect(onCardRef).toHaveBeenCalledWith(0, null)
   })
 })

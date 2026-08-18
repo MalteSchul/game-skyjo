@@ -427,5 +427,105 @@ describe('MatchView', () => {
 
       expect(onDrawStock).not.toHaveBeenCalled()
     })
+
+    it('auto-focuses the first available card as soon as the board renders, with no prior Tab/click (happy path)', () => {
+      render(
+        <MatchView
+          match={BASE_MATCH}
+          error={null}
+          busy={false}
+          discardMode={false}
+          onCreate={noop}
+          onDrawStock={noop}
+          onDrawDiscard={noop}
+          onSetDiscardMode={noop}
+          onCardClick={noop}
+          onNextRound={noop}
+          onPlayAgain={noop}
+        />,
+      )
+
+      const firstCard = screen.getAllByRole('button', { name: 'face-down card' })[0]
+      expect(firstCard).toHaveFocus()
+      expect(firstCard).toHaveAttribute('tabindex', '0')
+    })
+
+    it('moves focus with the arrow keys even when nothing is focused, skipping unavailable cards (happy path)', () => {
+      const sparseMatch: MatchStateOut = {
+        ...BASE_MATCH,
+        legal_actions: [0, 2, 6].map((position) => ({ type: 'flip_initial' as const, position })),
+      }
+      render(
+        <MatchView
+          match={sparseMatch}
+          error={null}
+          busy={false}
+          discardMode={false}
+          onCreate={noop}
+          onDrawStock={noop}
+          onDrawDiscard={noop}
+          onSetDiscardMode={noop}
+          onCardClick={noop}
+          onNextRound={noop}
+          onPlayAgain={noop}
+        />,
+      )
+
+      // Simulate a fresh page load where nothing has focus yet.
+      ;(document.activeElement as HTMLElement | null)?.blur()
+      expect(document.body).toHaveFocus()
+
+      const cards = screen.getAllByRole('button', { name: 'face-down card' })
+      fireEvent.keyDown(window, { key: 'ArrowRight' })
+      expect(cards[2]).toHaveFocus()
+
+      fireEvent.keyDown(window, { key: 'ArrowDown' })
+      expect(cards[6]).toHaveFocus()
+    })
+
+    it("moves the focused player's board along with the turn once the match state advances (happy path)", () => {
+      const afterFirstFlip: MatchStateOut = {
+        ...BASE_MATCH,
+        current_player: 1,
+        boards: [
+          { cards: [{ value: 5, face_up: true }, ...blankBoard().cards.slice(1)] },
+          blankBoard(),
+        ],
+        legal_actions: Array.from({ length: 12 }, (_, i) => ({ type: 'flip_initial' as const, position: i })),
+      }
+      const { rerender } = render(
+        <MatchView
+          match={BASE_MATCH}
+          error={null}
+          busy={false}
+          discardMode={false}
+          onCreate={noop}
+          onDrawStock={noop}
+          onDrawDiscard={noop}
+          onSetDiscardMode={noop}
+          onCardClick={noop}
+          onNextRound={noop}
+          onPlayAgain={noop}
+        />,
+      )
+
+      rerender(
+        <MatchView
+          match={afterFirstFlip}
+          error={null}
+          busy={false}
+          discardMode={false}
+          onCreate={noop}
+          onDrawStock={noop}
+          onDrawDiscard={noop}
+          onSetDiscardMode={noop}
+          onCardClick={noop}
+          onNextRound={noop}
+          onPlayAgain={noop}
+        />,
+      )
+
+      expect((document.activeElement as HTMLElement).closest('.player-board')).toHaveTextContent('Grace')
+    })
   })
 })

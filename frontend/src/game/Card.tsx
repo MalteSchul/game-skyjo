@@ -5,11 +5,12 @@ import { cardTone } from './cardTone'
 interface CardProps {
   card: CardOut | null
   onClick?: () => void
+  onFocus?: () => void
   tabIndex?: number
 }
 
 /** Renders one board slot: a cleared column (empty), a face-down back, or a revealed value. */
-const Card = forwardRef<HTMLButtonElement, CardProps>(function Card({ card, onClick, tabIndex }, ref) {
+const Card = forwardRef<HTMLButtonElement, CardProps>(function Card({ card, onClick, onFocus, tabIndex }, ref) {
   if (card === null) {
     return <div className="card card-empty" aria-label="cleared slot" />
   }
@@ -26,6 +27,7 @@ const Card = forwardRef<HTMLButtonElement, CardProps>(function Card({ card, onCl
       type="button"
       className={className}
       onClick={onClick}
+      onFocus={onFocus}
       disabled={!clickable}
       tabIndex={clickable ? tabIndex : undefined}
       aria-label={card.face_up ? `card ${card.value}` : 'face-down card'}
