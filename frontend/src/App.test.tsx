@@ -1,18 +1,20 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from './api/matchClient'
+import { loadStoredMatchId, storeMatchId } from './api/matchStorage'
 import type { MatchStateOut } from './api/types'
 import App from './App'
 
-const { createMatch, applyAction, startNextRound } = vi.hoisted(() => ({
+const { createMatch, applyAction, startNextRound, getMatch } = vi.hoisted(() => ({
   createMatch: vi.fn(),
   applyAction: vi.fn(),
   startNextRound: vi.fn(),
+  getMatch: vi.fn(),
 }))
 
 vi.mock('./api/matchClient', async () => {
   const actual = await vi.importActual<typeof import('./api/matchClient')>('./api/matchClient')
-  return { ...actual, createMatch, applyAction, startNextRound }
+  return { ...actual, createMatch, applyAction, startNextRound, getMatch }
 })
 
 const INITIAL_FLIP_MATCH: MatchStateOut = {
@@ -48,6 +50,8 @@ beforeEach(() => {
   createMatch.mockReset()
   applyAction.mockReset()
   startNextRound.mockReset()
+  getMatch.mockReset()
+  localStorage.clear()
   // The health check in App's useEffect hits the real `fetch`, not matchClient
   // — stub it so tests don't make a real network call or race on its result.
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }))
@@ -55,6 +59,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  localStorage.clear()
 })
 
 describe('App', () => {
@@ -114,5 +119,47 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
 
     expect(await screen.findByText('Something went wrong.')).toBeInTheDocument()
+  })
+
+  it('remembers the match id and restores it on the next visit (happy path)', async () => {
+    createMatch.mockResolvedValue(INITIAL_FLIP_MATCH)
+    const { unmount } = render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
+    await screen.findByRole('heading', { name: /Player 1/ })
+
+    expect(loadStoredMatchId()).toBe('m1')
+    // Simulate a page refresh: the whole tree unmounts and a fresh App boots.
+    unmount()
+
+    getMatch.mockResolvedValue(AWAITING_DRAW_MATCH)
+    render(<App />)
+
+    expect(await screen.findByRole('button', { name: 'Stock, 142 cards left' })).toBeInTheDocument()
+    expect(getMatch).toHaveBeenCalledWith('m1')
+  })
+
+  it('falls back to the new-match form and forgets the id when the remembered match no longer exists (sad path)', async () => {
+    storeMatchId('stale-id')
+    getMatch.mockRejectedValue(new ApiError(404, "match 'stale-id' not found"))
+
+    render(<App />)
+
+    expect(await screen.findByRole('button', { name: 'Start match' })).toBeInTheDocument()
+    expect(loadStoredMatchId()).toBeNull()
+  })
+
+  it('forgets the stored match once the player starts a new one after game over (bad path: avoids getting stuck on a finished match)', async () => {
+    createMatch.mockResolvedValue(INITIAL_FLIP_MATCH)
+    render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
+    await screen.findByRole('heading', { name: /Player 1/ })
+    applyAction.mockResolvedValue({ ...INITIAL_FLIP_MATCH, phase: 'game_over', total_scores: [80, 30] })
+    fireEvent.click(screen.getAllByRole('button', { name: 'face-down card' })[0])
+    await screen.findByRole('button', { name: 'Play again' })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Play again' }))
+
+    expect(screen.getByRole('button', { name: 'Start match' })).toBeInTheDocument()
+    expect(loadStoredMatchId()).toBeNull()
   })
 })
