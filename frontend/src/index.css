@@ -1,15 +1,34 @@
 :root {
   --text: #6b6375;
   --text-h: #08060d;
+  --text-muted: #948d9c;
   --bg: #fff;
+  --bg-panel: #fff;
   --border: #e5e4e7;
+  --border-strong: #d3d1d8;
   --code-bg: #f4f3ec;
   --accent: #aa3bff;
   --accent-bg: rgba(170, 59, 255, 0.1);
   --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
+  --danger: #c02a41;
+  --danger-bg: rgba(192, 42, 65, 0.08);
+  --danger-border: rgba(192, 42, 65, 0.3);
+  --shadow-sm: rgba(20, 10, 30, 0.08) 0 2px 6px -1px, rgba(20, 10, 30, 0.04) 0 1px 2px;
   --shadow:
     rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+
+  /* Skyjo's five card colour bands, shared by board cards, the drawn-card
+     display and the discard pile swatch via the .tone-* utility classes. */
+  --tone-neg-bg: #4f46e5;
+  --tone-neg-fg: #fff;
+  --tone-zero-bg: #0284c7;
+  --tone-zero-fg: #fff;
+  --tone-low-bg: #15803d;
+  --tone-low-fg: #fff;
+  --tone-mid-bg: #f59e0b;
+  --tone-mid-fg: #2b1c00;
+  --tone-high-bg: #dc2626;
+  --tone-high-fg: #fff;
 
   --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
   --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
@@ -34,20 +53,31 @@
   :root {
     --text: #9ca3af;
     --text-h: #f3f4f6;
+    --text-muted: #6b7280;
     --bg: #16171d;
+    --bg-panel: #1b1c23;
     --border: #2e303a;
+    --border-strong: #3c3e4a;
     --code-bg: #1f2028;
     --accent: #c084fc;
     --accent-bg: rgba(192, 132, 252, 0.15);
     --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
+    --danger: #f0899b;
+    --danger-bg: rgba(240, 137, 155, 0.12);
+    --danger-border: rgba(240, 137, 155, 0.35);
+    --shadow-sm: rgba(0, 0, 0, 0.35) 0 2px 6px -1px, rgba(0, 0, 0, 0.2) 0 1px 2px;
     --shadow:
       rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-  }
 
-  #social .button-icon {
-    filter: invert(1) brightness(2);
+    --tone-neg-bg: #6366f1;
+    --tone-zero-bg: #0ea5e9;
+    --tone-low-bg: #16a34a;
+    --tone-high-bg: #ef4444;
   }
+}
+
+* {
+  box-sizing: border-box;
 }
 
 #root {
@@ -67,20 +97,45 @@ body {
 }
 
 h1,
-h2 {
+h2,
+h3 {
   font-family: var(--heading);
   font-weight: 500;
   color: var(--text-h);
 }
 
 h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
+  font-size: 40px;
+  letter-spacing: -1.2px;
+  margin: 28px 0 4px;
   @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
+    font-size: 30px;
+    margin: 18px 0 4px;
   }
+}
+
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  padding: 14px 24px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.app-header h1 {
+  margin: 0;
+  font-size: 28px;
+  @media (max-width: 1024px) {
+    font-size: 24px;
+  }
+}
+.app-header .scoreboard {
+  margin: 0;
 }
 h2 {
   font-size: 24px;
@@ -95,17 +150,572 @@ p {
   margin: 0;
 }
 
-code,
-.counter {
-  font-family: var(--mono);
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Buttons & fields --------------------------------------------------- */
+
+.btn-primary {
+  font: inherit;
+  font-weight: 600;
+  font-size: 15px;
+  color: #fff;
+  background: var(--accent);
+  border: none;
+  border-radius: 10px;
+  padding: 11px 22px;
+  cursor: pointer;
+  transition: transform 150ms ease, box-shadow 150ms ease, opacity 150ms ease;
+}
+.btn-primary:hover:not(:disabled) {
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
+}
+.btn-primary:active:not(:disabled) {
+  transform: translateY(0);
+}
+.btn-primary:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 14px;
+}
+
+.field-label {
+  color: var(--text-muted);
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.field input {
+  font: inherit;
+  font-size: 15px;
+  color: var(--text-h);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 9px 10px;
+  width: 120px;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+.field input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+
+/* New match ------------------------------------------------------------ */
+
+.new-match-panel {
+  margin: 24px auto 32px;
+  padding: 28px 28px 24px;
+  width: 360px;
+  max-width: calc(100% - 32px);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-sm);
+}
+
+.card-fan {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 18px;
+}
+.card-fan .card {
+  width: 40px;
+  height: 56px;
+  font-size: 0;
+  margin: 0 -8px;
+}
+.card-fan .card:nth-child(1) {
+  transform: rotate(-10deg) translateY(5px);
+}
+.card-fan .card:nth-child(2) {
+  transform: translateY(-4px);
+}
+.card-fan .card:nth-child(3) {
+  transform: rotate(10deg) translateY(5px);
+}
+
+.new-match-form {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+}
+
+.new-match-row {
+  display: flex;
+  gap: 14px;
+  align-items: flex-end;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.new-match-form .btn-primary {
+  height: 39px;
+}
+
+.player-name-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+}
+
+.player-name-fields .field {
+  width: 100%;
+}
+
+.player-name-fields .field input {
+  width: 100%;
+}
+
+.error-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 16px auto;
+  padding: 10px 16px;
+  width: fit-content;
+  max-width: calc(100% - 32px);
+  color: var(--danger);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: 10px;
+  font-size: 14px;
+}
+
+/* Scoreboard ------------------------------------------------------------ */
+
+.scoreboard {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  list-style: none;
+  margin: 8px 0 20px;
+  padding: 0;
+}
+
+.score-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg-panel);
+}
+
+.score-chip-value {
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: var(--code-bg);
+  color: var(--text-h);
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.score-chip-active {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+  color: var(--text-h);
+}
+.score-chip-active .score-chip-value {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* Center piles / drawn card ---------------------------------------------- */
+
+.turn-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0 20px;
+}
+
+.center-piles {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.pile {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 18px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-panel);
+  color: var(--text-h);
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 150ms ease, box-shadow 150ms ease, border-color 150ms ease;
+}
+.pile-stock::before {
+  content: '';
+  flex-shrink: 0;
+  width: 20px;
+  height: 27px;
   border-radius: 4px;
+  border: 1px solid var(--accent-border);
+  background: repeating-linear-gradient(
+    135deg,
+    var(--accent-bg),
+    var(--accent-bg) 3px,
+    transparent 3px,
+    transparent 6px
+  ),
+    var(--code-bg);
+}
+
+.pile-label {
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* A plain grey pill is "how many" — the same visual language as the
+   scoreboard's counters. A tone-coloured pill is "which card" — it borrows
+   the tone set on .pile-discard so it always matches the top card's colour,
+   the same way a face-up board card would. Keeping the two visually distinct
+   is the point: one counts cards, the other names a value. */
+.pile-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--code-bg);
+  color: var(--text-h);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.pile-value {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--tone-bg, var(--border));
+  color: var(--tone-fg, var(--text-h));
+  font-size: 13px;
+  font-weight: 700;
+}
+.pile-value-empty {
+  background: var(--border);
+  color: var(--text-muted);
+}
+
+.pile:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
+}
+.pile:active:not(:disabled) {
+  transform: translateY(0);
+}
+.pile:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Always mounted (see CenterPiles) so its layout slot is reserved before any
+   card has been drawn — hidden via visibility, not unmounted, so drawing a
+   card never changes the piles row's height. */
+.drawn-card-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.drawn-card-slot-hidden {
+  visibility: hidden;
+}
+
+.drawn-card-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+/* Always mounted (see CenterPiles) so its layout slot is reserved even when
+   there's nothing to toggle yet — hidden via visibility, not unmounted, so
+   its own appearance/disappearance never shifts the piles above it. */
+.mode-toggle-row {
+  display: flex;
+  justify-content: center;
+}
+.mode-toggle-row-hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.mode-toggle {
+  display: inline-flex;
+  padding: 4px;
+  gap: 2px;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.mode-toggle-btn {
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  border-radius: 999px;
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: background 150ms ease, color 150ms ease;
+}
+.mode-toggle-btn:hover {
+  color: var(--text-h);
+}
+.mode-toggle-btn-active,
+.mode-toggle-btn-active:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* Round / game over -------------------------------------------------- */
+
+.status-panel {
+  margin: 8px auto 24px;
+  padding: 20px 28px 24px;
+  width: fit-content;
+  max-width: calc(100% - 32px);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-sm);
+}
+
+.round-scores {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px 18px;
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  font-size: 15px;
+}
+
+.round-scores li {
+  display: flex;
+  gap: 6px;
+  color: var(--text);
+}
+.round-scores li span:last-child {
+  font-family: var(--mono);
+  color: var(--text-h);
+  font-weight: 600;
+}
+
+.winner-line {
+  font-size: 16px;
   color: var(--text-h);
 }
 
-code {
-  font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
-  background: var(--code-bg);
+/* Player boards -------------------------------------------------------- */
+
+.boards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  justify-content: center;
+  margin: 8px 0 32px;
+}
+
+.player-board {
+  position: relative;
+  overflow: hidden;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-sm);
+  padding: 18px 16px 16px;
+}
+
+.player-board-active {
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 3px var(--accent-bg), var(--shadow-sm);
+}
+.player-board-active::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 4px;
+  background: var(--accent);
+}
+
+.player-board-name {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 0 0 14px;
+  font-size: 16px;
+}
+
+.turn-chip {
+  display: inline-flex;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.turn-chip-final {
+  background: var(--tone-mid-bg);
+  color: var(--tone-mid-fg);
+}
+
+.board-grid {
+  display: grid;
+  gap: 8px;
+  justify-content: center;
+}
+
+/* Cards ------------------------------------------------------------------ */
+
+.card {
+  width: 52px;
+  height: 72px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  font-weight: 700;
+  font-family: var(--mono);
+  color: var(--text-h);
+  padding: 0;
+  transition: transform 150ms ease, box-shadow 150ms ease, border-color 150ms ease;
+  @media (max-width: 480px) {
+    width: 42px;
+    height: 58px;
+    font-size: 16px;
+    border-radius: 8px;
+  }
+}
+
+.card-face-down {
+  background: repeating-linear-gradient(
+    135deg,
+    var(--accent-bg),
+    var(--accent-bg) 5px,
+    transparent 5px,
+    transparent 10px
+  ),
+    var(--code-bg);
+  border-color: var(--accent-border);
+}
+
+.card-face-up {
+  background: var(--tone-bg, var(--bg));
+  color: var(--tone-fg, var(--text-h));
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.06);
+}
+
+.card-empty {
+  border-style: dashed;
+  border-color: var(--border-strong);
+  opacity: 0.5;
+}
+
+.card-clickable {
+  cursor: pointer;
+}
+.card-clickable:hover {
+  border-color: var(--accent);
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-sm);
+}
+.card-clickable:active {
+  transform: translateY(-1px);
+}
+
+.card:disabled {
+  cursor: default;
+}
+
+.card-lg {
+  width: 68px;
+  height: 92px;
+  font-size: 26px;
+  border-radius: 12px;
+  box-shadow: var(--shadow-sm), inset 0 0 0 1px rgba(0, 0, 0, 0.06);
+}
+
+/* Card colour bands, shared by .card-face-up and the discard pile swatch. */
+.tone-neg {
+  --tone-bg: var(--tone-neg-bg);
+  --tone-fg: var(--tone-neg-fg);
+}
+.tone-zero {
+  --tone-bg: var(--tone-zero-bg);
+  --tone-fg: var(--tone-zero-fg);
+}
+.tone-low {
+  --tone-bg: var(--tone-low-bg);
+  --tone-fg: var(--tone-low-fg);
+}
+.tone-mid {
+  --tone-bg: var(--tone-mid-bg);
+  --tone-fg: var(--tone-mid-fg);
+}
+.tone-high {
+  --tone-bg: var(--tone-high-bg);
+  --tone-fg: var(--tone-high-fg);
 }
