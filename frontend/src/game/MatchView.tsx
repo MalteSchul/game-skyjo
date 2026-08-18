@@ -1,8 +1,13 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { ActionTypeName, MatchStateOut } from '../api/types'
 import CenterPiles from './CenterPiles'
+import KeyboardHelp from './KeyboardHelp'
 import NewMatchForm from './NewMatchForm'
 import PlayerBoard from './PlayerBoard'
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+}
 
 function legalPositionsFor(match: MatchStateOut, type: ActionTypeName): Set<number> {
   return new Set(
@@ -48,6 +53,66 @@ function MatchView({
     () => (match ? match.legal_actions.some((a) => a.type === 'draw_discard') : false),
     [match],
   )
+  const canToggleMode = match?.phase === 'awaiting_placement' && discardRevealPositions.size > 0
+
+  const [helpOpen, setHelpOpen] = useState(false)
+
+  // Global one-key shortcuts for the actions a turn can take: drawing, the
+  // place/discard-reveal mode toggle, and round transitions. Per-card
+  // selection is handled separately, by arrow-key roving tabindex inside
+  // each PlayerBoard.
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (!match || event.ctrlKey || event.metaKey || event.altKey || isTypingTarget(event.target)) return
+
+      if (event.key === '?') {
+        event.preventDefault()
+        setHelpOpen((open) => !open)
+        return
+      }
+      if (helpOpen) {
+        if (event.key === 'Escape') setHelpOpen(false)
+        return
+      }
+      if (busy) return
+
+      switch (event.key.toLowerCase()) {
+        case 's':
+          if (canDrawStock) onDrawStock()
+          break
+        case 'd':
+          if (canDrawDiscard) onDrawDiscard()
+          break
+        case 'm':
+          if (canToggleMode) onSetDiscardMode(!discardMode)
+          break
+        case 'n':
+          if (match.phase === 'round_over') onNextRound()
+          break
+        case 'p':
+          if (match.phase === 'game_over') onPlayAgain()
+          break
+        default:
+          break
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [
+    match,
+    busy,
+    helpOpen,
+    canDrawStock,
+    canDrawDiscard,
+    canToggleMode,
+    discardMode,
+    onDrawStock,
+    onDrawDiscard,
+    onSetDiscardMode,
+    onNextRound,
+    onPlayAgain,
+  ])
 
   if (!match) {
     return (
@@ -61,6 +126,13 @@ function MatchView({
   return (
     <div className="match-view">
       {error && <p className="error-banner">{error}</p>}
+
+      <div className="match-toolbar">
+        <button type="button" className="shortcuts-trigger" onClick={() => setHelpOpen(true)}>
+          ⌨ Shortcuts <kbd>?</kbd>
+        </button>
+      </div>
+      <KeyboardHelp open={helpOpen} onClose={() => setHelpOpen(false)} />
 
       <CenterPiles
         stockCount={match.stock_count}

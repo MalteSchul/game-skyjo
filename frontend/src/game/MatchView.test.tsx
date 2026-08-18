@@ -242,4 +242,190 @@ describe('MatchView', () => {
 
     expect(onPlayAgain).toHaveBeenCalledTimes(1)
   })
+
+  describe('keyboard shortcuts', () => {
+    const DRAW_MATCH: MatchStateOut = {
+      ...BASE_MATCH,
+      phase: 'awaiting_draw' as MatchStateOut['phase'],
+      legal_actions: [
+        { type: 'draw_stock', position: null },
+        { type: 'draw_discard', position: null },
+      ],
+    }
+
+    it('draws from the stock and discard pile via "s" and "d" (happy path)', () => {
+      const onDrawStock = vi.fn()
+      const onDrawDiscard = vi.fn()
+      render(
+        <MatchView
+          match={DRAW_MATCH}
+          error={null}
+          busy={false}
+          discardMode={false}
+          onCreate={noop}
+          onDrawStock={onDrawStock}
+          onDrawDiscard={onDrawDiscard}
+          onSetDiscardMode={noop}
+          onCardClick={noop}
+          onNextRound={noop}
+          onPlayAgain={noop}
+        />,
+      )
+
+      fireEvent.keyDown(window, { key: 's' })
+      fireEvent.keyDown(window, { key: 'd' })
+
+      expect(onDrawStock).toHaveBeenCalledTimes(1)
+      expect(onDrawDiscard).toHaveBeenCalledTimes(1)
+    })
+
+    it('toggles the place/discard-reveal mode with "m" (happy path)', () => {
+      const onSetDiscardMode = vi.fn()
+      const placeMatch: MatchStateOut = {
+        ...BASE_MATCH,
+        phase: 'awaiting_placement',
+        drawn_card: 6,
+        legal_actions: [
+          { type: 'place', position: 0 },
+          { type: 'discard_and_reveal', position: 1 },
+        ],
+      }
+      render(
+        <MatchView
+          match={placeMatch}
+          error={null}
+          busy={false}
+          discardMode={false}
+          onCreate={noop}
+          onDrawStock={noop}
+          onDrawDiscard={noop}
+          onSetDiscardMode={onSetDiscardMode}
+          onCardClick={noop}
+          onNextRound={noop}
+          onPlayAgain={noop}
+        />,
+      )
+
+      fireEvent.keyDown(window, { key: 'm' })
+
+      expect(onSetDiscardMode).toHaveBeenCalledWith(true)
+    })
+
+    it('starts the next round with "n" and plays again with "p" (happy path)', () => {
+      const onNextRound = vi.fn()
+      const roundOverMatch: MatchStateOut = { ...BASE_MATCH, phase: 'round_over', round_scores: [4, 9] }
+      const { unmount } = render(
+        <MatchView
+          match={roundOverMatch}
+          error={null}
+          busy={false}
+          discardMode={false}
+          onCreate={noop}
+          onDrawStock={noop}
+          onDrawDiscard={noop}
+          onSetDiscardMode={noop}
+          onCardClick={noop}
+          onNextRound={onNextRound}
+          onPlayAgain={noop}
+        />,
+      )
+      fireEvent.keyDown(window, { key: 'n' })
+      expect(onNextRound).toHaveBeenCalledTimes(1)
+      unmount()
+
+      const onPlayAgain = vi.fn()
+      const gameOverMatch: MatchStateOut = { ...BASE_MATCH, phase: 'game_over', total_scores: [42, 17] }
+      render(
+        <MatchView
+          match={gameOverMatch}
+          error={null}
+          busy={false}
+          discardMode={false}
+          onCreate={noop}
+          onDrawStock={noop}
+          onDrawDiscard={noop}
+          onSetDiscardMode={noop}
+          onCardClick={noop}
+          onNextRound={noop}
+          onPlayAgain={onPlayAgain}
+        />,
+      )
+      fireEvent.keyDown(window, { key: 'p' })
+      expect(onPlayAgain).toHaveBeenCalledTimes(1)
+    })
+
+    it('opens the shortcuts help on "?" and closes it on Escape (happy path)', () => {
+      render(
+        <MatchView
+          match={BASE_MATCH}
+          error={null}
+          busy={false}
+          discardMode={false}
+          onCreate={noop}
+          onDrawStock={noop}
+          onDrawDiscard={noop}
+          onSetDiscardMode={noop}
+          onCardClick={noop}
+          onNextRound={noop}
+          onPlayAgain={noop}
+        />,
+      )
+
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+      fireEvent.keyDown(window, { key: '?' })
+      expect(screen.getByRole('dialog', { name: 'Keyboard shortcuts' })).toBeInTheDocument()
+      fireEvent.keyDown(window, { key: 'Escape' })
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    })
+
+    it('ignores draw/round shortcuts that are not legal right now (sad path)', () => {
+      const onDrawStock = vi.fn()
+      const onNextRound = vi.fn()
+      render(
+        <MatchView
+          match={BASE_MATCH}
+          error={null}
+          busy={false}
+          discardMode={false}
+          onCreate={noop}
+          onDrawStock={onDrawStock}
+          onDrawDiscard={noop}
+          onSetDiscardMode={noop}
+          onCardClick={noop}
+          onNextRound={onNextRound}
+          onPlayAgain={noop}
+        />,
+      )
+
+      // BASE_MATCH is in initial_flip: neither drawing nor next-round is legal.
+      fireEvent.keyDown(window, { key: 's' })
+      fireEvent.keyDown(window, { key: 'n' })
+
+      expect(onDrawStock).not.toHaveBeenCalled()
+      expect(onNextRound).not.toHaveBeenCalled()
+    })
+
+    it('ignores shortcuts entirely while busy, to avoid double-submitting an action (bad path)', () => {
+      const onDrawStock = vi.fn()
+      render(
+        <MatchView
+          match={DRAW_MATCH}
+          error={null}
+          busy
+          discardMode={false}
+          onCreate={noop}
+          onDrawStock={onDrawStock}
+          onDrawDiscard={noop}
+          onSetDiscardMode={noop}
+          onCardClick={noop}
+          onNextRound={noop}
+          onPlayAgain={noop}
+        />,
+      )
+
+      fireEvent.keyDown(window, { key: 's' })
+
+      expect(onDrawStock).not.toHaveBeenCalled()
+    })
+  })
 })
