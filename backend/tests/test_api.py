@@ -314,6 +314,23 @@ def test_create_match_rejects_an_unknown_player_type():
     assert response.status_code == 422
 
 
+def test_an_mcts_bot_seat_auto_plays_its_initial_flip(monkeypatch):
+    # Keeps the real AlphaZeroNet -> MCTS -> factory -> API path intact, just
+    # with few enough simulations per move to stay fast in CI.
+    monkeypatch.setenv("SKYJO_MCTS_NUM_SIMULATIONS", "2")
+
+    match_id = client.post(
+        "/matches",
+        json={"player_count": 2, "seed": 7, "player_types": ["mcts_bot", "human"]},
+    ).json()["match_id"]
+
+    body = _wait_for_idle(client, match_id, timeout=10.0)
+    assert body["phase"] == "initial_flip"
+    assert body["current_player"] == 1
+    face_up = sum(1 for card in body["boards"][0]["cards"] if card["face_up"])
+    assert face_up == 1
+
+
 def test_a_bot_seat_auto_plays_its_initial_flip_before_the_response_is_returned():
     response = client.post(
         "/matches",

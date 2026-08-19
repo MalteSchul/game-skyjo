@@ -45,6 +45,16 @@ describe('NewMatchForm', () => {
     expect(onCreate).toHaveBeenCalledWith(2, undefined, ['', ''], ['human', 'thinking_bot'])
   })
 
+  it('lets a seat be set to an MCTS bot and submits the chosen player types (happy path)', () => {
+    const onCreate = vi.fn()
+    render(<NewMatchForm onCreate={onCreate} submitting={false} />)
+
+    fireEvent.change(screen.getByLabelText('Player 2 type'), { target: { value: 'mcts_bot' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
+
+    expect(onCreate).toHaveBeenCalledWith(2, undefined, ['', ''], ['human', 'mcts_bot'])
+  })
+
   it('preserves already-chosen player types when the player count changes (bad path: no data loss on resize)', () => {
     const onCreate = vi.fn()
     render(<NewMatchForm onCreate={onCreate} submitting={false} />)

@@ -51,6 +51,83 @@ def test_root_total_visit_count_equals_num_simulations():
     assert root.visit_count == 25
 
 
+def test_on_simulation_is_called_once_per_simulation_with_a_1_indexed_step():
+    state = new_match(player_count=2, seed=1)
+    steps: list[int] = []
+
+    run_mcts(
+        Turn.from_state(state),
+        _uniform_evaluate,
+        num_simulations=5,
+        rng=np.random.default_rng(0),
+        on_simulation=steps.append,
+    )
+
+    assert steps == [1, 2, 3, 4, 5]
+
+
+def test_on_simulation_is_never_called_for_zero_simulations():
+    state = new_match(player_count=2, seed=1)
+    steps: list[int] = []
+
+    run_mcts(
+        Turn.from_state(state),
+        _uniform_evaluate,
+        num_simulations=0,
+        rng=np.random.default_rng(0),
+        on_simulation=steps.append,
+    )
+
+    assert steps == []
+
+
+def test_on_root_ready_fires_once_with_an_already_expanded_root_before_any_simulation():
+    state = new_match(player_count=2, seed=1)
+    call_count = 0
+    visit_count_at_ready: int | None = None
+
+    def on_root_ready(root: MCTSNode) -> None:
+        nonlocal call_count, visit_count_at_ready
+        call_count += 1
+        visit_count_at_ready = root.visit_count
+        assert root.expanded
+
+    run_mcts(
+        Turn.from_state(state),
+        _uniform_evaluate,
+        num_simulations=3,
+        rng=np.random.default_rng(0),
+        on_root_ready=on_root_ready,
+    )
+
+    assert call_count == 1
+    assert visit_count_at_ready == 0
+
+
+def test_on_root_ready_hands_back_the_same_live_object_run_mcts_returns():
+    state = new_match(player_count=2, seed=1)
+    ready_roots: list[MCTSNode] = []
+
+    returned_root = run_mcts(
+        Turn.from_state(state),
+        _uniform_evaluate,
+        num_simulations=5,
+        rng=np.random.default_rng(0),
+        on_root_ready=ready_roots.append,
+    )
+
+    assert ready_roots[0] is returned_root
+    assert returned_root.visit_count == 5
+
+
+def test_on_root_ready_is_optional():
+    state = new_match(player_count=2, seed=1)
+
+    root = run_mcts(Turn.from_state(state), _uniform_evaluate, num_simulations=2, rng=np.random.default_rng(0))
+
+    assert root.visit_count == 2
+
+
 def test_run_mcts_rejects_negative_simulation_count():
     state = new_match(player_count=2, seed=1)
 

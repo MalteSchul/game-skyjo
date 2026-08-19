@@ -23,7 +23,7 @@ from skyjo.domain.engine import (
 )
 
 ActionTypeName = Literal["flip_initial", "draw_stock", "draw_discard", "place", "discard_and_reveal"]
-PlayerTypeName = Literal["human", "random_bot", "thinking_bot"]
+PlayerTypeName = Literal["human", "random_bot", "thinking_bot", "mcts_bot"]
 MatchStatus = Literal["idle", "thinking"]
 
 

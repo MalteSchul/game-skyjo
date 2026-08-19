@@ -318,7 +318,16 @@ def run_mcts(
     dirichlet_epsilon: float = DEFAULT_DIRICHLET_EPSILON,
     add_root_noise: bool = True,
     rng: np.random.Generator | None = None,
+    on_simulation: Callable[[int], None] | None = None,
+    on_root_ready: Callable[[MCTSNode], None] | None = None,
 ) -> MCTSNode:
+    """`on_root_ready`, if given, fires exactly once - after the root is
+    expanded and root noise applied, before the first simulation - with the
+    same `MCTSNode` object this call will keep mutating and eventually
+    return. It exists so a caller can snapshot the tree mid-search (e.g. via
+    `on_simulation`) without waiting for `run_mcts` to return: the object it
+    receives *is* the live root, not a copy.
+    """
     if num_simulations < 0:
         raise ValueError("run_mcts: num_simulations must be >= 0")
     rng = rng if rng is not None else np.random.default_rng()
@@ -332,8 +341,13 @@ def run_mcts(
     if add_root_noise:
         _apply_root_noise(root, dirichlet_alpha, dirichlet_epsilon, rng)
 
-    for _ in range(num_simulations):
+    if on_root_ready is not None:
+        on_root_ready(root)
+
+    for i in range(num_simulations):
         _simulate_once(root, evaluate, c_puct, rng)
+        if on_simulation is not None:
+            on_simulation(i + 1)
 
     return root
 
