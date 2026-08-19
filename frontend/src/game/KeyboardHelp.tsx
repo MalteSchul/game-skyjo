@@ -16,16 +16,15 @@ const SHORTCUT_GROUPS: { title: string; entries: ShortcutEntry[] }[] = [
   {
     title: 'Drawing',
     entries: [
-      { keys: ['S'], description: 'Draw from the stock' },
-      { keys: ['D'], description: 'Draw from the discard pile' },
-      { keys: ['M'], description: 'Toggle place on board / discard & reveal' },
+      { keys: ['Q'], description: 'Draw from the stock (or place the drawn card)' },
+      { keys: ['W'], description: 'Draw from the discard pile (or discard & reveal instead)' },
     ],
   },
   {
     title: 'Round',
     entries: [
       { keys: ['N'], description: 'Start next round, once a round ends' },
-      { keys: ['P'], description: 'Play again, once the game ends' },
+      { keys: ['P'], description: 'Restart the game (confirms first, unless the game already ended)' },
     ],
   },
   {

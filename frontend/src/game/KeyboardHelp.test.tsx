@@ -7,7 +7,7 @@ describe('KeyboardHelp', () => {
     render(<KeyboardHelp open onClose={vi.fn()} />)
 
     expect(screen.getByRole('dialog', { name: 'Keyboard shortcuts' })).toBeInTheDocument()
-    expect(screen.getByText('Draw from the stock')).toBeInTheDocument()
+    expect(screen.getByText('Draw from the stock (or place the drawn card)')).toBeInTheDocument()
     expect(screen.getByText('Show or hide this shortcuts list')).toBeInTheDocument()
   })
 
@@ -21,7 +21,7 @@ describe('KeyboardHelp', () => {
     const onClose = vi.fn()
     render(<KeyboardHelp open onClose={onClose} />)
 
-    fireEvent.click(screen.getByText('Draw from the stock'))
+    fireEvent.click(screen.getByText('Draw from the stock (or place the drawn card)'))
     expect(onClose).not.toHaveBeenCalled()
 
     fireEvent.click(screen.getByRole('button', { name: 'Close' }))
