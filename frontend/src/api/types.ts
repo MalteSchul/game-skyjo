@@ -5,7 +5,7 @@ export type Phase = 'initial_flip' | 'awaiting_draw' | 'awaiting_placement' | 'r
 
 export type ActionTypeName = 'flip_initial' | 'draw_stock' | 'draw_discard' | 'place' | 'discard_and_reveal'
 
-export type PlayerTypeName = 'human' | 'random_bot' | 'thinking_bot' | 'mcts_bot'
+export type PlayerTypeName = 'human' | 'random_bot' | 'thinking_bot' | 'heuristic_bot' | 'mcts_bot'
 
 export type MatchStatus = 'idle' | 'thinking'
 

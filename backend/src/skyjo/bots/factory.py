@@ -8,6 +8,7 @@ trust that it's being handed one of those already-validated strings.
 from __future__ import annotations
 
 from skyjo.bots.base import Bot
+from skyjo.bots.heuristic_bot import HeuristicBot
 from skyjo.bots.mcts_bot import MctsBot, default_evaluator, default_num_simulations
 from skyjo.bots.random_bot import RandomBot
 from skyjo.bots.thinking_bot import ThinkingBot
@@ -21,6 +22,8 @@ def create_bot(player_type: str, seed: int | None = None) -> Bot | None:
         return RandomBot(seed=seed)
     if player_type == "thinking_bot":
         return ThinkingBot(seed=seed)
+    if player_type == "heuristic_bot":
+        return HeuristicBot(seed=seed)
     if player_type == "mcts_bot":
         return MctsBot(evaluate=default_evaluator(), num_simulations=default_num_simulations(), seed=seed)
     raise ValueError(f"create_bot: unknown player_type {player_type!r}")
