@@ -59,6 +59,11 @@ class BoardView:
 @dataclass(frozen=True)
 class Observation:
     boards: tuple[BoardView, ...]
+    # The full pile, not just the top: every discard is a public event, so
+    # its entire history is fair game for a viewer (or a policy) to know -
+    # unlike stock order, nothing here is hidden. discard_top/discard_count
+    # are kept alongside it as the two projections most consumers actually need.
+    discard: tuple[int, ...]
     discard_top: int | None
     discard_count: int
     stock_count: int
@@ -76,6 +81,7 @@ class Observation:
     def from_state(cls, state: GameState) -> Observation:
         return cls(
             boards=tuple(BoardView.from_board(b) for b in state.boards),
+            discard=state.discard,
             discard_top=state.discard[-1] if state.discard else None,
             discard_count=len(state.discard),
             stock_count=len(state.stock),
@@ -96,6 +102,12 @@ class Turn:
     acting_player: int
     phase: Phase
     boards: tuple[BoardView, ...]
+    # Full pile - see Observation.discard. This is what makes Turn alone
+    # enough to compute the odds behind a hidden card or a stock draw: the
+    # only genuinely secret things left are stock order and face-down values,
+    # and both are exactly deck composition minus every card counted here
+    # (revealed board cards) or in this pile.
+    discard: tuple[int, ...]
     discard_top: int | None
     discard_count: int
     stock_count: int
@@ -115,6 +127,7 @@ class Turn:
             acting_player=state.current_player,
             phase=state.phase,
             boards=tuple(BoardView.from_board(b) for b in state.boards),
+            discard=state.discard,
             discard_top=state.discard[-1] if state.discard else None,
             discard_count=len(state.discard),
             stock_count=len(state.stock),
