@@ -53,6 +53,22 @@ describe('Scoreboard', () => {
     expect(screen.getByText('Grace').closest('li')).not.toHaveTextContent('(Bot)')
   })
 
+  it('tags a thinking_bot seat the same as a random_bot seat (happy path)', () => {
+    render(
+      <Scoreboard
+        playerNames={['Ada', 'Grace']}
+        playerTypes={['thinking_bot', 'human']}
+        scores={[4, 9]}
+        currentPlayer={0}
+        status="idle"
+        thinkingPlayer={null}
+      />,
+    )
+
+    expect(screen.getByText('(Bot)')).toBeInTheDocument()
+    expect(screen.getByText('Grace').closest('li')).not.toHaveTextContent('(Bot)')
+  })
+
   it('shows the thinking variant only for the bot seat currently deciding (happy path)', () => {
     render(
       <Scoreboard

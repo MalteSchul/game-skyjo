@@ -2,6 +2,7 @@ import pytest
 
 from skyjo.bots.factory import create_bot
 from skyjo.bots.random_bot import RandomBot
+from skyjo.bots.thinking_bot import ThinkingBot
 
 
 def test_human_seats_have_no_bot():
@@ -12,6 +13,12 @@ def test_random_bot_type_returns_a_random_bot_instance():
     bot = create_bot("random_bot", seed=5)
 
     assert isinstance(bot, RandomBot)
+
+
+def test_thinking_bot_type_returns_a_thinking_bot_instance():
+    bot = create_bot("thinking_bot", seed=5)
+
+    assert isinstance(bot, ThinkingBot)
 
 
 def test_rejects_an_unknown_player_type():
