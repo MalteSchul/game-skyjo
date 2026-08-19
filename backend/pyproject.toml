@@ -9,6 +9,8 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.141.1",
+    "numpy>=2.5.2",
+    "torch>=2.13.0",
     "uvicorn[standard]>=0.52.3",
 ]
 
@@ -34,3 +36,13 @@ line-length = 100
 
 [tool.ruff.lint]
 extend-select = ["I", "B"]
+
+[tool.uv.sources]
+# This service never runs on a GPU; PyPI's default Linux torch wheel pulls in
+# ~2GB of unused nvidia-cu13-* packages, so pin to PyTorch's CPU-only index.
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
