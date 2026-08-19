@@ -1,28 +1,63 @@
 """Vector-valued MCTS: PUCT selection keyed to the active player's own
 utility component, multi-agent backpropagation, Dirichlet root noise.
 
-A `round_over` GameState is not a decision point (nobody chooses to start
-the next round - `start_next_round` is a deterministic pass-through, mirrored
-here from the same pattern the bot autoplay loop and match API use), so it's
-never stored as a tree node: `_advance_state` folds it into the transition
-that produced it. `game_over` states end the search: their value comes from
-the actual final ranking, not a network estimate.
+Rooted at a `Turn`, not a `GameState` - the search only ever sees what the
+`Turn`/`Observation` layer already treats as public (see `domain.observation`
+and `rl.hidden_info`). Every `GameState` this module holds internally is a
+redacted one (`hidden_info.gamestate_from_turn`/`rescrub`): whichever hidden
+card the *true* game holds at any position, this module never reads it -
+stock draws, initial flips, and discard-reveals are resolved as genuine
+chance events, sampled from the pool of cards that are still unknown given
+only what's public, never by peeking at the answer.
 
-Player count is fixed for a whole match, so `n_act` - and therefore the
-shape of every edge's value vector - is constant across an entire tree.
+Two kinds of node:
+- `MCTSNode`: a decision point, exactly as before - PUCT over `MCTSEdge`s
+  keyed by `Action`.
+- `ChanceNode`: sits between a reveal-triggering edge and the decision node
+  it leads to, with `ChanceEdge`s keyed by the revealed *value* instead of
+  an action, weighted by how many of that value are still unknown. Visits
+  resample every time (`sample_reveal`), so repeat visits to the same value
+  land on the same cached child (ordinary MCTS structure-sharing) while
+  different sampled values grow sibling branches - the tree's own Q-average
+  at the parent edge becomes a genuine Monte Carlo estimate over the hidden
+  distribution, not one frozen guess at the future.
+
+One case doesn't get a `ChanceNode`: the action that closes a round forces
+*every* remaining hidden card on *every* board face-up at once (Skyjo scores
+a round by revealing everyone's hand). Enumerating that jointly is
+intractable and, since a fresh round is dealt from an entirely independent
+shuffle right after, there's nothing meaningfully cacheable about a specific
+resolution anyway - so it's resampled and evaluated fresh on every visit,
+never cached on the edge. That's still an average over many independently
+sampled continuations across the search, just without a persistent subtree
+below it (see `_is_round_closing`/`_advance_round_closing`).
 """
 
 from __future__ import annotations
 
 import math
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
 
-from skyjo.domain.engine import Action, GameState, apply_action, start_next_round
+from skyjo.domain.action_equivalence import group_representatives
+from skyjo.domain.engine import Action, ActionType, GameState, apply_action, start_next_round
+from skyjo.domain.observation import Turn
+from skyjo.rl.hidden_info import (
+    gamestate_from_turn,
+    is_reveal,
+    rescrub,
+    resolve_drawn_stock_card,
+    resolve_reveal,
+    resolve_round_close,
+    sample_reveal,
+    unknown_card_counts,
+    will_close_round,
+)
 
-# priors: prob per legal action, normalized over legal actions only.
+# priors: prob per legal (post-collapsing) action, normalized over legal actions only.
 # value: utility vector of length n_act, aligned to player index.
 EvaluateFn = Callable[[GameState], "tuple[dict[Action, float], np.ndarray]"]
 
@@ -38,7 +73,7 @@ class MCTSEdge:
     n_act: int
     visit_count: int = 0
     value_sum: np.ndarray = field(default_factory=lambda: np.zeros(0))
-    child: MCTSNode | None = None
+    child: MCTSNode | ChanceNode | None = None
 
     def __post_init__(self) -> None:
         if self.value_sum.shape != (self.n_act,):
@@ -48,6 +83,27 @@ class MCTSEdge:
         if self.visit_count == 0:
             return np.zeros(self.n_act)
         return self.value_sum / self.visit_count
+
+
+@dataclass
+class ChanceEdge:
+    value: int
+    prior: float
+    n_act: int
+    visit_count: int = 0
+    value_sum: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    child: MCTSNode | None = None
+
+    def __post_init__(self) -> None:
+        if self.value_sum.shape != (self.n_act,):
+            self.value_sum = np.zeros(self.n_act)
+
+
+@dataclass
+class ChanceNode:
+    n_act: int
+    counts: Counter[int]
+    edges: dict[int, ChanceEdge] = field(default_factory=dict)
 
 
 @dataclass
@@ -65,13 +121,6 @@ class MCTSNode:
 
 def _is_terminal(state: GameState) -> bool:
     return state.phase == "game_over"
-
-
-def _advance_state(state: GameState, action: Action) -> GameState:
-    next_state = apply_action(state, action)
-    while next_state.phase == "round_over":
-        next_state = start_next_round(next_state)
-    return next_state
 
 
 def _terminal_utility(total_scores: Sequence[int]) -> np.ndarray:
@@ -99,9 +148,20 @@ def _terminal_utility(total_scores: Sequence[int]) -> np.ndarray:
     return 1.0 - 2.0 * ranks / denom
 
 
-def _expand(node: MCTSNode, priors: dict[Action, float]) -> None:
+def _expand(node: MCTSNode, turn: Turn, priors: dict[Action, float]) -> None:
+    """Builds `node.edges` from the network's priors, collapsing provably-
+    equivalent actions (see `domain.action_equivalence`) onto one shared
+    representative edge first, so the search doesn't spend visits telling
+    apart options that can't differ given what's currently known.
+    """
+    representative_of = group_representatives(turn)
+    collapsed: dict[Action, float] = {}
+    for action, prior in priors.items():
+        representative = representative_of.get(action, action)
+        collapsed[representative] = collapsed.get(representative, 0.0) + prior
+
     node.edges = {
-        action: MCTSEdge(action=action, prior=prior, n_act=node.n_act) for action, prior in priors.items()
+        action: MCTSEdge(action=action, prior=prior, n_act=node.n_act) for action, prior in collapsed.items()
     }
     node.expanded = True
 
@@ -136,39 +196,120 @@ def _select_edge(node: MCTSNode, c_puct: float) -> MCTSEdge:
     return best_edge
 
 
-def _simulate_once(root: MCTSNode, evaluate: EvaluateFn, c_puct: float) -> None:
-    path: list[MCTSEdge] = []
+def _expand_child(state: GameState, evaluate: EvaluateFn, n_act: int) -> tuple[MCTSNode, np.ndarray]:
+    terminal = _is_terminal(state)
+    child = MCTSNode(state=state, n_act=n_act, is_terminal=terminal)
+    if terminal:
+        return child, _terminal_utility(state.total_scores)
+
+    priors, value = evaluate(state)
+    _expand(child, Turn.from_state(state), priors)
+    return child, value
+
+
+def _is_round_closing(state: GameState, action: Action) -> bool:
+    return will_close_round(state, action)
+
+
+def _advance_deterministic(state: GameState, action: Action) -> GameState:
+    """Neither a reveal nor round-closing: nothing hidden is involved."""
+    return rescrub(apply_action(state, action))
+
+
+def _advance_resolved_reveal(state: GameState, action: Action, value: int) -> GameState:
+    """A single-card reveal, already resolved to `value` by a ChanceEdge."""
+    if action.type is ActionType.DRAW_STOCK:
+        return rescrub(resolve_drawn_stock_card(apply_action(state, action), value))
+    primed = resolve_reveal(state, action, value)
+    return rescrub(apply_action(primed, action))
+
+
+def _advance_round_closing(state: GameState, action: Action, rng: np.random.Generator) -> GameState:
+    """The last-awaiting player's closing action: resolves this action's own
+    reveal (if any) plus every other player's remaining hidden cards at
+    once, since round-close scoring reveals everyone's hand simultaneously.
+    Folds any resulting `round_over` into the freshly-dealt next round, same
+    as the deterministic path used to do for every transition.
+    """
+    patched = state
+    already_resolved: tuple[int, int] | None = None
+    if is_reveal(state, action):
+        value = sample_reveal(unknown_card_counts(Turn.from_state(state)), rng)
+        patched = resolve_reveal(patched, action, value)
+        already_resolved = (state.current_player, action.position)
+
+    patched = resolve_round_close(patched, rng, already_resolved=already_resolved)
+    next_state = rescrub(apply_action(patched, action))
+    while next_state.phase == "round_over":
+        next_state = rescrub(start_next_round(next_state))
+    return next_state
+
+
+def _simulate_once(root: MCTSNode, evaluate: EvaluateFn, c_puct: float, rng: np.random.Generator) -> None:
+    path: list[MCTSEdge | ChanceEdge] = []
     node = root
 
     while True:
         edge = _select_edge(node, c_puct)
         path.append(edge)
+        state = node.state
 
-        if edge.child is None:
-            child_state = _advance_state(node.state, edge.action)
-            is_terminal = _is_terminal(child_state)
-            child = MCTSNode(state=child_state, n_act=node.n_act, is_terminal=is_terminal)
-            edge.child = child
-            if is_terminal:
-                value = _terminal_utility(child_state.total_scores)
-            else:
-                priors, value = evaluate(child_state)
-                _expand(child, priors)
+        if _is_round_closing(state, edge.action):
+            # Never cached on edge.child: every visit resamples the reveal
+            # and the round-close together, so this edge's own Q is an
+            # average over many independently sampled continuations rather
+            # than one frozen future (see module docstring).
+            child_state = _advance_round_closing(state, edge.action, rng)
+            child, value = _expand_child(child_state, evaluate, node.n_act)
             break
 
+        if is_reveal(state, edge.action):
+            chance = edge.child
+            if not isinstance(chance, ChanceNode):
+                chance = ChanceNode(n_act=node.n_act, counts=unknown_card_counts(Turn.from_state(state)))
+                edge.child = chance
+
+            sampled_value = sample_reveal(chance.counts, rng)
+            chance_edge = chance.edges.get(sampled_value)
+            if chance_edge is None:
+                total = sum(chance.counts.values())
+                chance_edge = ChanceEdge(
+                    value=sampled_value,
+                    prior=chance.counts[sampled_value] / total,
+                    n_act=node.n_act,
+                )
+                chance.edges[sampled_value] = chance_edge
+            path.append(chance_edge)
+
+            if chance_edge.child is None:
+                child_state = _advance_resolved_reveal(state, edge.action, sampled_value)
+                child, value = _expand_child(child_state, evaluate, node.n_act)
+                chance_edge.child = child
+                break
+            if chance_edge.child.is_terminal:
+                value = _terminal_utility(chance_edge.child.state.total_scores)
+                break
+            node = chance_edge.child
+            continue
+
+        # Deterministic: neither a reveal nor round-closing.
+        if not isinstance(edge.child, MCTSNode):
+            child_state = _advance_deterministic(state, edge.action)
+            child, value = _expand_child(child_state, evaluate, node.n_act)
+            edge.child = child
+            break
         if edge.child.is_terminal:
             value = _terminal_utility(edge.child.state.total_scores)
             break
-
         node = edge.child
 
-    for edge in path:
-        edge.visit_count += 1
-        edge.value_sum += value
+    for visited in path:
+        visited.visit_count += 1
+        visited.value_sum += value
 
 
 def run_mcts(
-    root_state: GameState,
+    root_turn: Turn,
     evaluate: EvaluateFn,
     *,
     num_simulations: int,
@@ -182,18 +323,17 @@ def run_mcts(
         raise ValueError("run_mcts: num_simulations must be >= 0")
     rng = rng if rng is not None else np.random.default_rng()
 
-    n_act = len(root_state.boards)
-    root = MCTSNode(state=root_state, n_act=n_act, is_terminal=_is_terminal(root_state))
-    if root.is_terminal:
-        return root
+    n_act = len(root_turn.boards)
+    root_state = gamestate_from_turn(root_turn)
+    root = MCTSNode(state=root_state, n_act=n_act, is_terminal=False)
 
     priors, _ = evaluate(root_state)
-    _expand(root, priors)
+    _expand(root, root_turn, priors)
     if add_root_noise:
         _apply_root_noise(root, dirichlet_alpha, dirichlet_epsilon, rng)
 
     for _ in range(num_simulations):
-        _simulate_once(root, evaluate, c_puct)
+        _simulate_once(root, evaluate, c_puct, rng)
 
     return root
 

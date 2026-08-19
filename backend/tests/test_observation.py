@@ -88,6 +88,7 @@ def test_observation_redacts_face_down_cards_and_exposes_public_state():
     assert obs.boards[0].cards[0] == CardView(value=5, face_up=True)
     assert obs.boards[0].cards[1] == CardView(value=None, face_up=False)
     assert obs.boards[1].cards[0] is None
+    assert obs.discard == (9, 7)
     assert obs.discard_top == 7
     assert obs.discard_count == 2
     assert obs.stock_count == 3
@@ -122,13 +123,16 @@ def test_observation_does_not_redact_the_drawn_card():
 def test_turn_mirrors_observation_for_the_fields_a_policy_needs():
     board0 = _board_from_values(list(range(12)))
     board1 = _board_from_values(list(range(12)))
-    state = _state((board0, board1), stock=(9,), drawn_card=None, current_player=0, phase="awaiting_draw")
+    state = _state(
+        (board0, board1), stock=(9,), discard=(3, 6), drawn_card=None, current_player=0, phase="awaiting_draw"
+    )
 
     turn = Turn.from_state(state)
 
     assert turn.acting_player == 0
     assert turn.phase == "awaiting_draw"
     assert turn.boards[0].cards[0] == CardView(value=None, face_up=False)
+    assert turn.discard == (3, 6)
     assert turn.stock_count == 1
     assert turn.legal_actions == (Action(ActionType.DRAW_STOCK), Action(ActionType.DRAW_DISCARD))
 

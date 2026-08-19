@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from skyjo.domain.engine import GameState, apply_action, start_next_round
+from skyjo.domain.observation import Turn
 from skyjo.rl.action_space import pi_to_vector
 from skyjo.rl.mcts import (
     DEFAULT_C_PUCT,
@@ -77,7 +78,7 @@ def generate_episode(
 
         tau = tau_schedule(step) if callable(tau_schedule) else tau_schedule
         root = run_mcts(
-            state,
+            Turn.from_state(state),
             evaluate,
             num_simulations=num_simulations,
             c_puct=c_puct,
