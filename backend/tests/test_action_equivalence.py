@@ -1,7 +1,7 @@
 from collections.abc import Sequence
 from dataclasses import replace
 
-from skyjo.bots.actions import distinct_actions
+from skyjo.domain.action_equivalence import distinct_actions, group_representatives
 from skyjo.domain.engine import (
     BOARD_SIZE,
     Action,
@@ -151,3 +151,31 @@ def test_distinct_actions_passes_draw_actions_through_unchanged():
     turn = Turn.from_state(state)
 
     assert distinct_actions(turn) == turn.legal_actions
+
+
+# --- group_representatives: the full action -> representative mapping --------
+
+
+def test_group_representatives_maps_every_legal_action_onto_a_distinct_action():
+    board0 = _reveal(_board_from_values([4, 11, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9]), 0, 1)
+    board1 = _board_from_values(list(range(12)))
+    state = _state((board0, board1), drawn_card=7)
+    turn = Turn.from_state(state)
+
+    mapping = group_representatives(turn)
+
+    assert set(mapping.keys()) == set(turn.legal_actions)
+    assert set(mapping.values()) == set(distinct_actions(turn))
+
+
+def test_group_representatives_groups_equivalent_hidden_slots_onto_the_same_representative():
+    board0 = _board_from_values(list(range(12)))  # fully hidden, blank columns everywhere
+    board1 = _board_from_values(list(range(12)))
+    state = _state((board0, board1), drawn_card=7)
+    turn = Turn.from_state(state)
+
+    mapping = group_representatives(turn)
+
+    place_2 = Action(ActionType.PLACE, position=2)
+    place_3 = Action(ActionType.PLACE, position=3)
+    assert mapping[place_2] == mapping[place_3]
