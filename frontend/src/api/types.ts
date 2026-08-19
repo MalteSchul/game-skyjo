@@ -5,6 +5,10 @@ export type Phase = 'initial_flip' | 'awaiting_draw' | 'awaiting_placement' | 'r
 
 export type ActionTypeName = 'flip_initial' | 'draw_stock' | 'draw_discard' | 'place' | 'discard_and_reveal'
 
+export type PlayerTypeName = 'human' | 'random_bot'
+
+export type MatchStatus = 'idle' | 'thinking'
+
 export interface CardOut {
   value: number | null
   face_up: boolean
@@ -24,6 +28,7 @@ export interface MatchStateOut {
   phase: Phase
   boards: BoardOut[]
   player_names: string[]
+  player_types: PlayerTypeName[]
   stock_count: number
   discard_top: number | null
   current_player: number
@@ -34,12 +39,16 @@ export interface MatchStateOut {
   total_scores: number[]
   target_score: number
   legal_actions: ActionOut[]
+  status: MatchStatus
+  thinking_player: number | null
+  thinking_progress: number | null
 }
 
 export interface NewMatchRequest {
   player_count: number
   seed?: number
   player_names?: string[]
+  player_types?: PlayerTypeName[]
 }
 
 export interface ActionRequest {

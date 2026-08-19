@@ -11,7 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from skyjo.api.store import Edge, MatchNode
+from skyjo.api.store import AutoplayStatus, Edge, MatchNode
 from skyjo.domain.engine import (
     Action,
     ActionType,
@@ -23,6 +23,8 @@ from skyjo.domain.engine import (
 )
 
 ActionTypeName = Literal["flip_initial", "draw_stock", "draw_discard", "place", "discard_and_reveal"]
+PlayerTypeName = Literal["human", "random_bot"]
+MatchStatus = Literal["idle", "thinking"]
 
 
 def action_type_from_name(name: str) -> ActionType:
@@ -42,6 +44,9 @@ class NewMatchRequest(BaseModel):
     # One name per player, in seat order. Omitted or blank entries fall back to
     # "Player N" — see api.matches._resolve_player_names.
     player_names: list[str] | None = None
+    # One type per player, in seat order. Omitted defaults every seat to
+    # "human" — see api.matches._resolve_player_types.
+    player_types: list[PlayerTypeName] | None = None
 
 
 class ActionRequest(BaseModel):
@@ -80,6 +85,7 @@ class MatchStateOut(BaseModel):
     phase: Phase
     boards: list[BoardOut]
     player_names: list[str]
+    player_types: list[PlayerTypeName]
     stock_count: int
     discard_top: int | None
     current_player: int
@@ -90,14 +96,25 @@ class MatchStateOut(BaseModel):
     total_scores: list[int]
     target_score: int
     legal_actions: list[ActionOut]
+    status: MatchStatus
+    thinking_player: int | None
+    thinking_progress: float | None
 
     @classmethod
-    def from_state(cls, match_id: str, state: GameState, player_names: Sequence[str]) -> MatchStateOut:
+    def from_state(
+        cls,
+        match_id: str,
+        state: GameState,
+        player_names: Sequence[str],
+        player_types: Sequence[str],
+        autoplay_status: AutoplayStatus,
+    ) -> MatchStateOut:
         return cls(
             match_id=match_id,
             phase=state.phase,
             boards=[BoardOut.from_board(b) for b in state.boards],
             player_names=list(player_names),
+            player_types=list(player_types),
             stock_count=len(state.stock),
             discard_top=state.discard[-1] if state.discard else None,
             current_player=state.current_player,
@@ -108,6 +125,9 @@ class MatchStateOut(BaseModel):
             total_scores=list(state.total_scores),
             target_score=state.target_score,
             legal_actions=[ActionOut.from_action(a) for a in legal_actions(state)],
+            status=autoplay_status.status,
+            thinking_player=autoplay_status.player,
+            thinking_progress=autoplay_status.progress,
         )
 
 

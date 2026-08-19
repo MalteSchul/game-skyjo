@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ActionTypeName, MatchStateOut } from '../api/types'
+import type { ActionTypeName, MatchStateOut, PlayerTypeName } from '../api/types'
 import CenterPiles from './CenterPiles'
 import KeyboardHelp from './KeyboardHelp'
 import NewMatchForm from './NewMatchForm'
@@ -21,7 +21,12 @@ interface MatchViewProps {
   error: string | null
   busy: boolean
   discardMode: boolean
-  onCreate: (playerCount: number, seed: number | undefined, playerNames: string[]) => void
+  onCreate: (
+    playerCount: number,
+    seed: number | undefined,
+    playerNames: string[],
+    playerTypes: PlayerTypeName[],
+  ) => void
   onDrawStock: () => void
   onDrawDiscard: () => void
   onSetDiscardMode: (discardMode: boolean) => void
@@ -43,27 +48,34 @@ function MatchView({
   onNextRound,
   onPlayAgain,
 }: MatchViewProps) {
+  // While a bot is deciding, nothing is actionable — regardless of what
+  // `legal_actions`/`current_player` say, since those describe the bot's
+  // seat, not anything a human at the keyboard can do right now.
+  const thinking = match?.status === 'thinking'
   const placePositions = useMemo(() => (match ? legalPositionsFor(match, 'place') : new Set<number>()), [match])
   const discardRevealPositions = useMemo(
     () => (match ? legalPositionsFor(match, 'discard_and_reveal') : new Set<number>()),
     [match],
   )
   const flipPositions = useMemo(() => (match ? legalPositionsFor(match, 'flip_initial') : new Set<number>()), [match])
-  const canDrawStock = useMemo(() => (match ? match.legal_actions.some((a) => a.type === 'draw_stock') : false), [match])
-  const canDrawDiscard = useMemo(
-    () => (match ? match.legal_actions.some((a) => a.type === 'draw_discard') : false),
-    [match],
+  const canDrawStock = useMemo(
+    () => (match && !thinking ? match.legal_actions.some((a) => a.type === 'draw_stock') : false),
+    [match, thinking],
   )
-  const canToggleMode = match?.phase === 'awaiting_placement' && discardRevealPositions.size > 0
+  const canDrawDiscard = useMemo(
+    () => (match && !thinking ? match.legal_actions.some((a) => a.type === 'draw_discard') : false),
+    [match, thinking],
+  )
+  const canToggleMode = match?.phase === 'awaiting_placement' && !thinking && discardRevealPositions.size > 0
 
   // The current player's selectable cards, regardless of phase — this is
   // also what arrow-key/roving-focus navigation operates over.
   const activeClickablePositions = useMemo(() => {
-    if (!match) return new Set<number>()
+    if (!match || thinking) return new Set<number>()
     if (match.phase === 'initial_flip') return flipPositions
     if (match.phase === 'awaiting_placement') return discardMode ? discardRevealPositions : placePositions
     return new Set<number>()
-  }, [match, discardMode, flipPositions, discardRevealPositions, placePositions])
+  }, [match, thinking, discardMode, flipPositions, discardRevealPositions, placePositions])
   const activeClickableList = useMemo(
     () => Array.from(activeClickablePositions).sort((a, b) => a - b),
     [activeClickablePositions],
@@ -241,6 +253,13 @@ function MatchView({
       <KeyboardHelp open={helpOpen} onClose={() => setHelpOpen(false)} />
       <RestartConfirm open={restartConfirmOpen} onConfirm={confirmRestart} onCancel={() => setRestartConfirmOpen(false)} />
 
+      {thinking && (
+        <p className="thinking-banner" role="status">
+          {match.player_names[match.thinking_player ?? match.current_player]} is thinking
+          {match.thinking_progress != null ? ` (${Math.round(match.thinking_progress * 100)}%)` : '…'}
+        </p>
+      )}
+
       <CenterPiles
         stockCount={match.stock_count}
         discardTop={match.discard_top}
@@ -249,7 +268,7 @@ function MatchView({
         canDrawDiscard={canDrawDiscard}
         onDrawStock={onDrawStock}
         onDrawDiscard={onDrawDiscard}
-        showModeToggle={match.phase === 'awaiting_placement' && discardRevealPositions.size > 0}
+        showModeToggle={canToggleMode}
         discardMode={discardMode}
         onSetDiscardMode={onSetDiscardMode}
       />

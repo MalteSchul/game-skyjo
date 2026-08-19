@@ -1,10 +1,16 @@
 import { useState } from 'react'
+import type { PlayerTypeName } from '../api/types'
 
 const MIN_PLAYERS = 2
 const MAX_PLAYERS = 8
 
 interface NewMatchFormProps {
-  onCreate: (playerCount: number, seed: number | undefined, playerNames: string[]) => void
+  onCreate: (
+    playerCount: number,
+    seed: number | undefined,
+    playerNames: string[],
+    playerTypes: PlayerTypeName[],
+  ) => void
   submitting: boolean
 }
 
@@ -13,6 +19,13 @@ interface NewMatchFormProps {
 function resizeNames(names: string[], count: number): string[] {
   const next = names.slice(0, count)
   while (next.length < count) next.push('')
+  return next
+}
+
+/** Same idea as resizeNames, but new seats default to "human" rather than blank. */
+function resizePlayerTypes(types: PlayerTypeName[], count: number): PlayerTypeName[] {
+  const next = types.slice(0, count)
+  while (next.length < count) next.push('human')
   return next
 }
 
@@ -28,23 +41,31 @@ function NewMatchForm({ onCreate, submitting }: NewMatchFormProps) {
   const [playerCountInput, setPlayerCountInput] = useState('2')
   const [seedInput, setSeedInput] = useState('')
   const [names, setNames] = useState<string[]>(['', ''])
+  const [playerTypes, setPlayerTypes] = useState<PlayerTypeName[]>(['human', 'human'])
 
   function handlePlayerCountInputChange(value: string) {
     setPlayerCountInput(value)
     if (value.trim() === '') return
     const parsed = Number(value)
     if (Number.isNaN(parsed)) return
-    setNames((prev) => resizeNames(prev, clampPlayerCount(parsed)))
+    const count = clampPlayerCount(parsed)
+    setNames((prev) => resizeNames(prev, count))
+    setPlayerTypes((prev) => resizePlayerTypes(prev, count))
   }
 
   function handlePlayerCountBlur() {
     const count = clampPlayerCount(Number(playerCountInput))
     setPlayerCountInput(String(count))
     setNames((prev) => resizeNames(prev, count))
+    setPlayerTypes((prev) => resizePlayerTypes(prev, count))
   }
 
   function handleNameChange(index: number, value: string) {
     setNames((prev) => prev.map((name, i) => (i === index ? value : name)))
+  }
+
+  function handlePlayerTypeChange(index: number, value: PlayerTypeName) {
+    setPlayerTypes((prev) => prev.map((type, i) => (i === index ? value : type)))
   }
 
   function handleSubmit(event: React.FormEvent) {
@@ -52,7 +73,12 @@ function NewMatchForm({ onCreate, submitting }: NewMatchFormProps) {
     const playerCount = clampPlayerCount(Number(playerCountInput))
     const seed = seedInput.trim() === '' ? undefined : Number(seedInput)
     // Blank entries are sent through as-is; the backend fills in "Player N" defaults.
-    onCreate(playerCount, seed, resizeNames(names, playerCount).map((name) => name.trim()))
+    onCreate(
+      playerCount,
+      seed,
+      resizeNames(names, playerCount).map((name) => name.trim()),
+      resizePlayerTypes(playerTypes, playerCount),
+    )
   }
 
   return (
@@ -87,16 +113,28 @@ function NewMatchForm({ onCreate, submitting }: NewMatchFormProps) {
         </div>
         <div className="player-name-fields">
           {names.map((name, i) => (
-            <label key={i} className="field">
-              <span className="field-label">Player {i + 1} name</span>
-              <input
-                type="text"
-                value={name}
-                placeholder={`Player ${i + 1}`}
-                maxLength={24}
-                onChange={(event) => handleNameChange(i, event.target.value)}
-              />
-            </label>
+            <div key={i} className="player-seat-row">
+              <label className="field player-name-field">
+                <span className="field-label">Player {i + 1} name</span>
+                <input
+                  type="text"
+                  value={name}
+                  placeholder={`Player ${i + 1}`}
+                  maxLength={24}
+                  onChange={(event) => handleNameChange(i, event.target.value)}
+                />
+              </label>
+              <label className="field player-type-field">
+                <span className="field-label">Player {i + 1} type</span>
+                <select
+                  value={playerTypes[i]}
+                  onChange={(event) => handlePlayerTypeChange(i, event.target.value as PlayerTypeName)}
+                >
+                  <option value="human">Human</option>
+                  <option value="random_bot">Random bot</option>
+                </select>
+              </label>
+            </div>
           ))}
         </div>
         <button type="submit" className="btn-primary" disabled={submitting}>
