@@ -31,6 +31,13 @@ _MIN_CARD_VALUE = -2
 _MAX_CARD_VALUE = 12
 _ACTIVE_COUNT_CLASSES = MAX_PLAYERS - MIN_PLAYERS + 1  # N_act in [2, 8] -> 7 classes
 
+# _normalize_value always lands in [0, 1], so -1 is never a value a real card
+# can take on - unlike 0, which collides with the lowest real card (-2). Used
+# everywhere a "value" feature sits next to its own presence/face_up bit, so
+# the value itself is unambiguous without needing the network to learn an
+# AND-gate between the two.
+_ABSENT_VALUE = -1.0
+
 _PHASES = ("initial_flip", "awaiting_draw", "awaiting_placement", "round_over", "game_over")
 
 GLOBAL_FEATURES = (
@@ -76,7 +83,7 @@ def encode_state(state: GameState) -> StateEncoding:
                 continue
             slot[position, 0] = 1.0
             slot[position, 1] = 1.0 if card.face_up else 0.0
-            slot[position, 2] = _normalize_value(card.value) if card.face_up else 0.0
+            slot[position, 2] = _normalize_value(card.value) if card.face_up else _ABSENT_VALUE
         board_block[player] = slot.reshape(-1)
 
     mask = legal_action_mask(state)
@@ -84,12 +91,12 @@ def encode_state(state: GameState) -> StateEncoding:
     global_features: list[float] = []
     discard_top = state.discard[-1] if state.discard else None
     global_features += [1.0 if discard_top is not None else 0.0]
-    global_features += [_normalize_value(discard_top) if discard_top is not None else 0.0]
+    global_features += [_normalize_value(discard_top) if discard_top is not None else _ABSENT_VALUE]
     global_features += [len(state.discard) / DECK_SIZE]
     global_features += [len(state.stock) / DECK_SIZE]
     global_features += [1.0 if state.phase == phase else 0.0 for phase in _PHASES]
     global_features += [1.0 if state.drawn_card is not None else 0.0]
-    global_features += [_normalize_value(state.drawn_card) if state.drawn_card is not None else 0.0]
+    global_features += [_normalize_value(state.drawn_card) if state.drawn_card is not None else _ABSENT_VALUE]
     global_features += [1.0 if state.finisher is not None else 0.0]
 
     finisher_onehot = [0.0] * N_MAX_PLAYERS
