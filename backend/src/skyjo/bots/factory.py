@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from skyjo.bots.base import Bot
 from skyjo.bots.random_bot import RandomBot
+from skyjo.bots.thinking_bot import ThinkingBot
 
 
 def create_bot(player_type: str, seed: int | None = None) -> Bot | None:
@@ -17,4 +18,6 @@ def create_bot(player_type: str, seed: int | None = None) -> Bot | None:
         return None
     if player_type == "random_bot":
         return RandomBot(seed=seed)
+    if player_type == "thinking_bot":
+        return ThinkingBot(seed=seed)
     raise ValueError(f"create_bot: unknown player_type {player_type!r}")

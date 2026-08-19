@@ -132,6 +132,7 @@ function NewMatchForm({ onCreate, submitting }: NewMatchFormProps) {
                 >
                   <option value="human">Human</option>
                   <option value="random_bot">Random bot</option>
+                  <option value="thinking_bot">Thinking bot (slow)</option>
                 </select>
               </label>
             </div>

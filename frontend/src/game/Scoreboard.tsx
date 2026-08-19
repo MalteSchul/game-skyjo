@@ -18,7 +18,7 @@ function Scoreboard({ playerNames, playerTypes, scores, currentPlayer, status, t
           <li key={i} className={`score-chip ${i === currentPlayer ? 'score-chip-active' : ''}`}>
             <span>
               {playerNames[i]}
-              {playerTypes[i] === 'random_bot' && (
+              {playerTypes[i] !== 'human' && (
                 <span className={`score-chip-bot-tag ${isThinking ? 'score-chip-thinking' : ''}`}>
                   {isThinking ? ' (Bot · thinking)' : ' (Bot)'}
                 </span>
