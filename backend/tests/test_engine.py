@@ -200,6 +200,39 @@ def test_round_ends_and_scores_without_doubling_when_finisher_has_sole_lowest():
     assert state.total_scores == (52, 67)
 
 
+def test_round_end_reveals_remaining_face_down_cards_but_leaves_cleared_slots_alone():
+    board0 = _hide(_board_from_values([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, -1, -2], face_up=True), 11)
+    board1 = _clear(_board_from_values([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12]), 0, 4, 8)
+    state = _state(
+        (board0, board1),
+        stock=(7, 3),
+        discard=(0,),
+        current_player=0,
+        phase="awaiting_draw",
+        reshuffle_seed=1,
+    )
+
+    state = apply_action(state, Action(ActionType.DRAW_STOCK))
+    state = apply_action(state, Action(ActionType.DISCARD_AND_REVEAL, position=11))
+    assert state.finisher == 0
+    assert state.players_awaiting_final_turn == frozenset({1})
+
+    # Player 1's single final turn only reveals position 1; the rest of their
+    # non-cleared cards are still face-down at the moment the round closes.
+    state = apply_action(state, Action(ActionType.DRAW_STOCK))
+    state = apply_action(state, Action(ActionType.DISCARD_AND_REVEAL, position=1))
+
+    assert state.phase == "round_over"
+    board1_after = state.boards[1]
+    assert board1_after.cards[0] is None
+    assert board1_after.cards[4] is None
+    assert board1_after.cards[8] is None
+    assert all(c.face_up for c in board1_after.cards if c is not None)
+    assert all(c.face_up for c in state.boards[0].cards if c is not None)
+    assert state.round_scores == (52, 55)
+    assert state.total_scores == (52, 55)
+
+
 def test_finisher_score_is_doubled_on_tie_for_lowest():
     state = _finish_round(
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, -1, -2],

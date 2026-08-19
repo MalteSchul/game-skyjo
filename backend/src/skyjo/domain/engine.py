@@ -291,9 +291,10 @@ def _is_board_complete(board: PlayerBoard) -> bool:
 
 
 def _score_and_close_round(state: GameState, finisher: int, awaiting: frozenset[int]) -> GameState:
-    round_scores = tuple(
-        sum(c.value for c in board.cards if c is not None) for board in state.boards
-    )
+    # Players turn over any remaining face-down cards at the table so the round's
+    # score is verifiable; mirror that by revealing everything before scoring.
+    boards = tuple(_reveal_all(board) for board in state.boards)
+    round_scores = tuple(sum(c.value for c in board.cards if c is not None) for board in boards)
     lowest = min(round_scores)
     finisher_is_sole_lowest = round_scores[finisher] == lowest and round_scores.count(lowest) == 1
     adjusted = tuple(
@@ -305,12 +306,17 @@ def _score_and_close_round(state: GameState, finisher: int, awaiting: frozenset[
 
     return replace(
         state,
+        boards=boards,
         phase=phase,
         finisher=finisher,
         players_awaiting_final_turn=awaiting,
         round_scores=round_scores,
         total_scores=total_scores,
     )
+
+
+def _reveal_all(board: PlayerBoard) -> PlayerBoard:
+    return replace(board, cards=tuple(c if c is None else replace(c, face_up=True) for c in board.cards))
 
 
 def _with_position(
