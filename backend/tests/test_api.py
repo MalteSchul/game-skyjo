@@ -1,8 +1,36 @@
+import threading
+import time
+
 from fastapi.testclient import TestClient
 
-from skyjo.api import app
+from skyjo.api import app, matches
 
 client = TestClient(app)
+
+
+def _wait_for_idle(client: TestClient, match_id: str, timeout: float = 2.0) -> dict:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        body = client.get(f"/matches/{match_id}").json()
+        if body["status"] == "idle":
+            return body
+        time.sleep(0.01)
+    raise AssertionError(f"match {match_id!r} did not reach idle status within {timeout}s")
+
+
+class _SlowBot:
+    """A bot whose choose_action blocks on a caller-controlled event, so tests
+    can deterministically observe the API mid-decision instead of racing a
+    real bot's (near-instant) resolution time."""
+
+    def __init__(self, release: threading.Event) -> None:
+        self._release = release
+
+    def choose_action(self, turn, *, report_progress=None):
+        if report_progress is not None:
+            report_progress(0.5)
+        self._release.wait(timeout=2.0)
+        return turn.legal_actions[0]
 
 
 def test_health_endpoint_responds_ok():
@@ -251,3 +279,189 @@ def test_goto_on_unknown_match_returns_404():
     response = client.post("/matches/does-not-exist/history/does-not-exist/goto")
 
     assert response.status_code == 404
+
+
+# --- bot seats ------------------------------------------------------------------
+
+
+def test_create_match_defaults_every_seat_to_human():
+    response = client.post("/matches", json={"player_count": 3})
+
+    assert response.json()["player_types"] == ["human", "human", "human"]
+
+
+def test_create_match_uses_the_given_player_types():
+    response = client.post(
+        "/matches", json={"player_count": 2, "player_types": ["random_bot", "human"]}
+    )
+
+    assert response.json()["player_types"] == ["random_bot", "human"]
+
+
+def test_create_match_rejects_a_player_types_length_mismatch():
+    response = client.post(
+        "/matches", json={"player_count": 3, "player_types": ["human", "random_bot"]}
+    )
+
+    assert response.status_code == 400
+
+
+def test_create_match_rejects_an_unknown_player_type():
+    response = client.post(
+        "/matches", json={"player_count": 2, "player_types": ["human", "grandmaster"]}
+    )
+
+    assert response.status_code == 422
+
+
+def test_a_bot_seat_auto_plays_its_initial_flip_before_the_response_is_returned():
+    response = client.post(
+        "/matches",
+        json={"player_count": 2, "seed": 7, "player_types": ["random_bot", "human"]},
+    )
+
+    body = response.json()
+    assert body["phase"] == "initial_flip"
+    assert body["current_player"] == 1
+    face_up = sum(1 for card in body["boards"][0]["cards"] if card["face_up"])
+    assert face_up == 1
+
+
+def test_bot_seat_finishes_its_initial_flips_after_the_human_takes_a_turn():
+    match_id = client.post(
+        "/matches",
+        json={"player_count": 2, "seed": 7, "player_types": ["random_bot", "human"]},
+    ).json()["match_id"]
+
+    response = client.post(f"/matches/{match_id}/actions", json={"type": "flip_initial", "position": 0})
+
+    body = response.json()
+    face_up = sum(1 for card in body["boards"][0]["cards"] if card["face_up"])
+    assert face_up == 2
+    assert body["current_player"] == 1
+    assert body["phase"] == "initial_flip"
+
+
+def test_two_bot_seats_play_an_entire_round_automatically():
+    match_id = client.post(
+        "/matches",
+        json={"player_count": 2, "seed": 3, "player_types": ["random_bot", "random_bot"]},
+    ).json()["match_id"]
+
+    # RandomBot resolves within the grace period nearly always, but polling
+    # to idle (rather than asserting on the creation response directly) keeps
+    # this robust regardless of how long that takes on a given machine.
+    body = _wait_for_idle(client, match_id)
+    assert body["phase"] in ("round_over", "game_over")
+    assert body["legal_actions"] == []
+
+
+def test_goto_does_not_trigger_additional_bot_auto_play():
+    match_id = client.post(
+        "/matches",
+        json={"player_count": 2, "seed": 7, "player_types": ["random_bot", "human"]},
+    ).json()["match_id"]
+    root_id = client.get(f"/matches/{match_id}/history").json()["nodes"][0]["node_id"]
+
+    response = client.post(f"/matches/{match_id}/history/{root_id}/goto")
+
+    body = response.json()
+    face_up = sum(1 for card in body["boards"][0]["cards"] if card["face_up"])
+    assert face_up == 0
+    assert body["current_player"] == 0
+
+
+# --- bot thinking status ---------------------------------------------------------
+
+
+def test_a_fully_human_match_reports_idle_status():
+    response = client.post("/matches", json={"player_count": 2, "seed": 7})
+
+    body = response.json()
+    assert body["status"] == "idle"
+    assert body["thinking_player"] is None
+    assert body["thinking_progress"] is None
+
+
+def test_response_reports_thinking_status_while_a_slow_bot_is_still_deciding(monkeypatch):
+    release = threading.Event()
+
+    def fake_create_bot(player_type, seed=None):
+        return None if player_type == "human" else _SlowBot(release)
+
+    monkeypatch.setattr(matches, "create_bot", fake_create_bot)
+    monkeypatch.setattr(matches, "AUTOPLAY_GRACE_SECONDS", 0.05)
+
+    response = client.post(
+        "/matches", json={"player_count": 2, "seed": 1, "player_types": ["random_bot", "human"]}
+    )
+
+    body = response.json()
+    assert body["status"] == "thinking"
+    assert body["thinking_player"] == 0
+    assert body["thinking_progress"] == 0.5
+
+    release.set()
+    match_id = body["match_id"]
+    _wait_for_idle(client, match_id)
+
+
+def test_polling_get_match_reaches_idle_once_a_slow_bot_finishes_deciding(monkeypatch):
+    release = threading.Event()
+
+    def fake_create_bot(player_type, seed=None):
+        return None if player_type == "human" else _SlowBot(release)
+
+    monkeypatch.setattr(matches, "create_bot", fake_create_bot)
+    monkeypatch.setattr(matches, "AUTOPLAY_GRACE_SECONDS", 0.05)
+
+    match_id = client.post(
+        "/matches", json={"player_count": 2, "seed": 1, "player_types": ["random_bot", "human"]}
+    ).json()["match_id"]
+    assert client.get(f"/matches/{match_id}").json()["status"] == "thinking"
+
+    release.set()
+    body = _wait_for_idle(client, match_id)
+    face_up = sum(1 for card in body["boards"][0]["cards"] if card["face_up"])
+    assert face_up == 1
+
+
+def test_actions_endpoint_returns_409_while_a_slow_bot_is_still_deciding(monkeypatch):
+    release = threading.Event()
+
+    def fake_create_bot(player_type, seed=None):
+        return None if player_type == "human" else _SlowBot(release)
+
+    monkeypatch.setattr(matches, "create_bot", fake_create_bot)
+    monkeypatch.setattr(matches, "AUTOPLAY_GRACE_SECONDS", 0.05)
+
+    match_id = client.post(
+        "/matches", json={"player_count": 2, "seed": 1, "player_types": ["random_bot", "human"]}
+    ).json()["match_id"]
+
+    response = client.post(f"/matches/{match_id}/actions", json={"type": "flip_initial", "position": 0})
+
+    assert response.status_code == 409
+    release.set()
+    _wait_for_idle(client, match_id)
+
+
+def test_goto_returns_409_while_a_slow_bot_is_still_deciding(monkeypatch):
+    release = threading.Event()
+
+    def fake_create_bot(player_type, seed=None):
+        return None if player_type == "human" else _SlowBot(release)
+
+    monkeypatch.setattr(matches, "create_bot", fake_create_bot)
+    monkeypatch.setattr(matches, "AUTOPLAY_GRACE_SECONDS", 0.05)
+
+    match_id = client.post(
+        "/matches", json={"player_count": 2, "seed": 1, "player_types": ["random_bot", "human"]}
+    ).json()["match_id"]
+    root_id = client.get(f"/matches/{match_id}/history").json()["nodes"][0]["node_id"]
+
+    response = client.post(f"/matches/{match_id}/history/{root_id}/goto")
+
+    assert response.status_code == 409
+    release.set()
+    _wait_for_idle(client, match_id)

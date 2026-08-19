@@ -14,6 +14,7 @@ const MATCH: MatchStateOut = {
   phase: 'initial_flip',
   boards: [{ cards: [] }],
   player_names: ['Player 1', 'Player 2'],
+  player_types: ['human', 'human'],
   stock_count: 140,
   discard_top: 3,
   current_player: 0,
@@ -24,6 +25,9 @@ const MATCH: MatchStateOut = {
   total_scores: [0, 0],
   target_score: 100,
   legal_actions: [],
+  status: 'idle',
+  thinking_player: null,
+  thinking_progress: null,
 }
 
 describe('matchClient', () => {

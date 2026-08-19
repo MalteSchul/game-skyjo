@@ -263,6 +263,23 @@ p {
   box-shadow: 0 0 0 3px var(--accent-bg);
 }
 
+.field select {
+  font: inherit;
+  font-size: 15px;
+  color: var(--text-h);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 9px 10px;
+  width: 120px;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+.field select:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+
 /* New match ------------------------------------------------------------ */
 
 .new-match-panel {
@@ -332,6 +349,25 @@ p {
   width: 100%;
 }
 
+.player-seat-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  width: 100%;
+}
+
+.player-seat-row .player-name-field {
+  flex: 1 1 auto;
+}
+
+.player-seat-row .player-type-field {
+  flex: 0 0 130px;
+}
+
+.player-seat-row .player-type-field select {
+  width: 100%;
+}
+
 .error-banner {
   display: flex;
   align-items: center;
@@ -346,6 +382,22 @@ p {
   border: 1px solid var(--danger-border);
   border-radius: 10px;
   font-size: 14px;
+}
+
+.thinking-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 16px;
+  padding: 10px 16px;
+  width: fit-content;
+  max-width: calc(100% - 32px);
+  color: var(--accent);
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 600;
 }
 
 /* Layout / history sidebar ------------------------------------------------ */
@@ -681,6 +733,16 @@ kbd {
 .score-chip-active .score-chip-value {
   background: var(--accent);
   color: #fff;
+}
+
+.score-chip-bot-tag {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.score-chip-thinking {
+  color: var(--accent);
+  font-weight: 600;
 }
 
 /* Center piles / drawn card ---------------------------------------------- */

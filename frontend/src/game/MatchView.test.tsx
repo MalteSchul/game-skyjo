@@ -12,6 +12,7 @@ const BASE_MATCH: MatchStateOut = {
   phase: 'initial_flip',
   boards: [blankBoard(), blankBoard()],
   player_names: ['Ada', 'Grace'],
+  player_types: ['human', 'human'],
   stock_count: 140,
   discard_top: 6,
   current_player: 0,
@@ -22,6 +23,9 @@ const BASE_MATCH: MatchStateOut = {
   total_scores: [0, 0],
   target_score: 100,
   legal_actions: Array.from({ length: 12 }, (_, i) => ({ type: 'flip_initial' as const, position: i })),
+  status: 'idle',
+  thinking_player: null,
+  thinking_progress: null,
 }
 
 function noop() {}
@@ -47,7 +51,7 @@ describe('MatchView', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
 
-    expect(onCreate).toHaveBeenCalledWith(2, undefined, ['', ''])
+    expect(onCreate).toHaveBeenCalledWith(2, undefined, ['', ''], ['human', 'human'])
   })
 
   it('calls onCardClick with the player index and position for a clickable board card (happy path)', () => {
@@ -629,6 +633,130 @@ describe('MatchView', () => {
       )
 
       expect((document.activeElement as HTMLElement).closest('.player-board')).toHaveTextContent('Grace')
+    })
+  })
+
+  describe('bot thinking status', () => {
+    it('shows a progress percentage while a bot is thinking (happy path)', () => {
+      const match: MatchStateOut = { ...BASE_MATCH, status: 'thinking', thinking_player: 0, thinking_progress: 0.42 }
+      render(
+        <MatchView
+          match={match}
+          error={null}
+          busy={false}
+          discardMode={false}
+          onCreate={noop}
+          onDrawStock={noop}
+          onDrawDiscard={noop}
+          onSetDiscardMode={noop}
+          onCardClick={noop}
+          onNextRound={noop}
+          onPlayAgain={noop}
+        />,
+      )
+
+      expect(screen.getByRole('status')).toHaveTextContent('Ada is thinking (42%)')
+    })
+
+    it('falls back to an indeterminate indicator when no progress has been reported yet (happy path)', () => {
+      const match: MatchStateOut = { ...BASE_MATCH, status: 'thinking', thinking_player: 1, thinking_progress: null }
+      render(
+        <MatchView
+          match={match}
+          error={null}
+          busy={false}
+          discardMode={false}
+          onCreate={noop}
+          onDrawStock={noop}
+          onDrawDiscard={noop}
+          onSetDiscardMode={noop}
+          onCardClick={noop}
+          onNextRound={noop}
+          onPlayAgain={noop}
+        />,
+      )
+
+      expect(screen.getByRole('status')).toHaveTextContent('Grace is thinking…')
+    })
+
+    it('shows no thinking indicator while idle (sad path)', () => {
+      render(
+        <MatchView
+          match={BASE_MATCH}
+          error={null}
+          busy={false}
+          discardMode={false}
+          onCreate={noop}
+          onDrawStock={noop}
+          onDrawDiscard={noop}
+          onSetDiscardMode={noop}
+          onCardClick={noop}
+          onNextRound={noop}
+          onPlayAgain={noop}
+        />,
+      )
+
+      expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    })
+
+    it('ignores card clicks while a bot is thinking, even on an otherwise-legal position (bad path)', () => {
+      const onCardClick = vi.fn()
+      const match: MatchStateOut = { ...BASE_MATCH, status: 'thinking', thinking_player: 1, thinking_progress: 0.1 }
+      render(
+        <MatchView
+          match={match}
+          error={null}
+          busy={false}
+          discardMode={false}
+          onCreate={noop}
+          onDrawStock={noop}
+          onDrawDiscard={noop}
+          onSetDiscardMode={noop}
+          onCardClick={onCardClick}
+          onNextRound={noop}
+          onPlayAgain={noop}
+        />,
+      )
+
+      const cards = screen.getAllByRole('button', { name: 'face-down card' })
+      expect(cards.every((card) => card.hasAttribute('disabled'))).toBe(true)
+
+      fireEvent.click(cards[0])
+      expect(onCardClick).not.toHaveBeenCalled()
+    })
+
+    it('ignores the draw shortcut while a bot is thinking (bad path)', () => {
+      const onDrawStock = vi.fn()
+      const match: MatchStateOut = {
+        ...BASE_MATCH,
+        phase: 'awaiting_draw',
+        status: 'thinking',
+        thinking_player: 0,
+        thinking_progress: 0.1,
+        legal_actions: [
+          { type: 'draw_stock', position: null },
+          { type: 'draw_discard', position: null },
+        ],
+      }
+      render(
+        <MatchView
+          match={match}
+          error={null}
+          busy={false}
+          discardMode={false}
+          onCreate={noop}
+          onDrawStock={onDrawStock}
+          onDrawDiscard={noop}
+          onSetDiscardMode={noop}
+          onCardClick={noop}
+          onNextRound={noop}
+          onPlayAgain={noop}
+        />,
+      )
+
+      fireEvent.keyDown(window, { key: 'q' })
+
+      expect(onDrawStock).not.toHaveBeenCalled()
     })
   })
 })

@@ -13,7 +13,7 @@ describe('NewMatchForm', () => {
     fireEvent.change(screen.getByLabelText('Player 3 name'), { target: { value: '  Grace  ' } })
     fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
 
-    expect(onCreate).toHaveBeenCalledWith(4, 42, ['Ada', '', 'Grace', ''])
+    expect(onCreate).toHaveBeenCalledWith(4, 42, ['Ada', '', 'Grace', ''], ['human', 'human', 'human', 'human'])
   })
 
   it('submits undefined for an empty seed and blank names instead of NaN or throwing (sad path)', () => {
@@ -22,7 +22,28 @@ describe('NewMatchForm', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
 
-    expect(onCreate).toHaveBeenCalledWith(2, undefined, ['', ''])
+    expect(onCreate).toHaveBeenCalledWith(2, undefined, ['', ''], ['human', 'human'])
+  })
+
+  it('lets a seat be set to a random bot and submits the chosen player types (happy path)', () => {
+    const onCreate = vi.fn()
+    render(<NewMatchForm onCreate={onCreate} submitting={false} />)
+
+    fireEvent.change(screen.getByLabelText('Player 2 type'), { target: { value: 'random_bot' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
+
+    expect(onCreate).toHaveBeenCalledWith(2, undefined, ['', ''], ['human', 'random_bot'])
+  })
+
+  it('preserves already-chosen player types when the player count changes (bad path: no data loss on resize)', () => {
+    const onCreate = vi.fn()
+    render(<NewMatchForm onCreate={onCreate} submitting={false} />)
+
+    fireEvent.change(screen.getByLabelText('Player 2 type'), { target: { value: 'random_bot' } })
+    fireEvent.change(screen.getByLabelText('Players'), { target: { value: '3' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
+
+    expect(onCreate).toHaveBeenCalledWith(3, undefined, ['', '', ''], ['human', 'random_bot', 'human'])
   })
 
   it('preserves already-typed names when the player count changes (bad path: no data loss on resize)', () => {

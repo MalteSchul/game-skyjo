@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from './api/matchClient'
 import { loadStoredMatchId, storeMatchId } from './api/matchStorage'
@@ -27,6 +27,7 @@ const INITIAL_FLIP_MATCH: MatchStateOut = {
     { cards: Array.from({ length: 12 }, () => ({ value: null, face_up: false })) },
   ],
   player_names: ['Player 1', 'Player 2'],
+  player_types: ['human', 'human'],
   stock_count: 142,
   discard_top: 6,
   current_player: 0,
@@ -37,6 +38,9 @@ const INITIAL_FLIP_MATCH: MatchStateOut = {
   total_scores: [0, 0],
   target_score: 100,
   legal_actions: Array.from({ length: 12 }, (_, i) => ({ type: 'flip_initial' as const, position: i })),
+  status: 'idle',
+  thinking_player: null,
+  thinking_progress: null,
 }
 
 const AWAITING_DRAW_MATCH: MatchStateOut = {
@@ -91,7 +95,12 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
 
     expect(await screen.findByRole('heading', { name: /Player 1/ })).toBeInTheDocument()
-    expect(createMatch).toHaveBeenCalledWith({ player_count: 2, seed: undefined, player_names: ['', ''] })
+    expect(createMatch).toHaveBeenCalledWith({
+      player_count: 2,
+      seed: undefined,
+      player_names: ['', ''],
+      player_types: ['human', 'human'],
+    })
   })
 
   it('shows the scoreboard in the header once a match starts, not before (happy path)', async () => {
@@ -270,5 +279,57 @@ describe('App', () => {
 
     expect(await screen.findByRole('heading', { name: /Player 1/ })).toBeInTheDocument()
     expect(screen.queryByLabelText('Match history')).not.toBeInTheDocument()
+  })
+
+  describe('bot thinking status', () => {
+    it('polls for match state while a bot is thinking and stops once it reports idle (happy path)', async () => {
+      createMatch.mockResolvedValue({
+        ...INITIAL_FLIP_MATCH,
+        status: 'thinking',
+        thinking_player: 0,
+        thinking_progress: 0.3,
+      })
+      getMatch.mockResolvedValueOnce({ ...INITIAL_FLIP_MATCH, status: 'idle' })
+      render(<App />)
+
+      fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
+
+      expect(await screen.findByText('Player 1 is thinking (30%)')).toBeInTheDocument()
+
+      await waitFor(() => expect(getMatch).toHaveBeenCalledWith('m1'), { timeout: 2000 })
+      await waitFor(() => expect(screen.queryByText(/is thinking/)).not.toBeInTheDocument(), { timeout: 2000 })
+    })
+
+    it('does not poll once a response already reports idle status (happy path: fast bot)', async () => {
+      createMatch.mockResolvedValue(INITIAL_FLIP_MATCH)
+      render(<App />)
+
+      fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
+      await screen.findByRole('heading', { name: /Player 1/ })
+
+      // Give a poll tick a chance to fire if the effect were (incorrectly)
+      // running anyway; it shouldn't, since status was already 'idle'.
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(getMatch).not.toHaveBeenCalled()
+    })
+
+    it('keeps polling after a transient poll failure instead of giving up (bad path)', async () => {
+      createMatch.mockResolvedValue({
+        ...INITIAL_FLIP_MATCH,
+        status: 'thinking',
+        thinking_player: 0,
+        thinking_progress: null,
+      })
+      getMatch
+        .mockRejectedValueOnce(new Error('network blip'))
+        .mockResolvedValueOnce({ ...INITIAL_FLIP_MATCH, status: 'idle' })
+      render(<App />)
+
+      fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
+      await screen.findByText('Player 1 is thinking…')
+
+      await waitFor(() => expect(getMatch).toHaveBeenCalledTimes(2), { timeout: 3000 })
+      await waitFor(() => expect(screen.queryByText(/is thinking/)).not.toBeInTheDocument(), { timeout: 3000 })
+    })
   })
 })

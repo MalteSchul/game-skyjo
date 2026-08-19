@@ -7,7 +7,15 @@ from skyjo.api.schemas import (
     NewMatchRequest,
     action_type_from_name,
 )
-from skyjo.api.store import MatchNode, MatchNotFoundError, MatchStore, NodeNotFoundError
+from skyjo.api.store import (
+    AutoplayStatus,
+    MatchBusyError,
+    MatchNode,
+    MatchNotFoundError,
+    MatchStore,
+    NodeNotFoundError,
+)
+from skyjo.bots.factory import create_bot
 from skyjo.domain.engine import (
     Action,
     GameState,
@@ -16,9 +24,22 @@ from skyjo.domain.engine import (
     new_match,
     start_next_round,
 )
+from skyjo.domain.observation import Turn
 
 router = APIRouter(prefix="/matches", tags=["matches"])
 store = MatchStore()
+
+# A bot's move is a single `apply_action` call, so an entire round of mixed
+# human/bot play (initial_flip through round_over) is well under this - it's
+# only a backstop against a pathological future bot never converging.
+MAX_BOT_AUTOPLAY_STEPS = 2000
+
+# How long a request blocks hoping the bot(s) it triggers finish inline. An
+# instant bot (e.g. RandomBot) always resolves well within this, so the
+# caller gets the fully-played-out state in one round trip, same as before
+# autoplay moved to a background thread. A slow bot (e.g. MCTS) times this
+# out; the caller gets a "thinking" status back and polls GET for the rest.
+AUTOPLAY_GRACE_SECONDS = 0.2
 
 
 @router.post("", response_model=MatchStateOut, status_code=201)
@@ -29,14 +50,21 @@ def create_match(request: NewMatchRequest) -> MatchStateOut:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     player_names = _resolve_player_names(request.player_names, request.player_count)
-    match_id = store.create(state, player_names)
-    return MatchStateOut.from_state(match_id, state, player_names)
+    player_types = _resolve_player_types(request.player_types, request.player_count)
+    bots = tuple(
+        create_bot(player_type, seed=None if request.seed is None else request.seed + i)
+        for i, player_type in enumerate(player_types)
+    )
+    match_id = store.create(state, player_names, player_types, bots)
+    node, player_names, player_types, status = _trigger_and_await(match_id)
+    return MatchStateOut.from_state(match_id, node.state, player_names, player_types, status)
 
 
 @router.get("/{match_id}", response_model=MatchStateOut)
 def get_match(match_id: str) -> MatchStateOut:
-    node, player_names = _get_head_or_404(match_id)
-    return MatchStateOut.from_state(match_id, node.state, player_names)
+    node, player_names, player_types = _get_head_or_404(match_id)
+    status = store.get_status(match_id)
+    return MatchStateOut.from_state(match_id, node.state, player_names, player_types, status)
 
 
 @router.post("/{match_id}/actions", response_model=MatchStateOut)
@@ -48,11 +76,14 @@ def apply_match_action(match_id: str, request: ActionRequest) -> MatchStateOut:
         return apply_action(state, action)
 
     try:
-        node, player_names = store.apply_action(match_id, action, compute)
+        store.apply_action(match_id, action, compute)
+        node, player_names, player_types, status = _trigger_and_await(match_id)
     except IllegalActionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except MatchBusyError as exc:
+        raise HTTPException(status_code=409, detail="match is busy: a bot is still deciding") from exc
 
-    return MatchStateOut.from_state(match_id, node.state, player_names)
+    return MatchStateOut.from_state(match_id, node.state, player_names, player_types, status)
 
 
 @router.post("/{match_id}/next-round", response_model=MatchStateOut)
@@ -60,11 +91,14 @@ def start_match_next_round(match_id: str) -> MatchStateOut:
     _get_head_or_404(match_id)
 
     try:
-        node, player_names = store.start_next_round(match_id, start_next_round)
+        store.start_next_round(match_id, start_next_round)
+        node, player_names, player_types, status = _trigger_and_await(match_id)
     except IllegalActionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except MatchBusyError as exc:
+        raise HTTPException(status_code=409, detail="match is busy: a bot is still deciding") from exc
 
-    return MatchStateOut.from_state(match_id, node.state, player_names)
+    return MatchStateOut.from_state(match_id, node.state, player_names, player_types, status)
 
 
 @router.get("/{match_id}/history", response_model=MatchHistoryOut)
@@ -78,21 +112,66 @@ def get_match_history(match_id: str) -> MatchHistoryOut:
 
 @router.post("/{match_id}/history/{node_id}/goto", response_model=MatchStateOut)
 def goto_match_history_node(match_id: str, node_id: str) -> MatchStateOut:
+    # Deliberately does not auto-play bots: goto is pure navigation to a state
+    # that already exists in the tree, not a new decision point.
     try:
-        node, player_names = store.goto(match_id, node_id)
+        node, player_names, player_types = store.goto(match_id, node_id)
     except MatchNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"match {match_id!r} not found") from exc
     except NodeNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"history node {node_id!r} not found") from exc
+    except MatchBusyError as exc:
+        raise HTTPException(status_code=409, detail="match is busy: a bot is still deciding") from exc
 
-    return MatchStateOut.from_state(match_id, node.state, player_names)
+    status = store.get_status(match_id)
+    return MatchStateOut.from_state(match_id, node.state, player_names, player_types, status)
 
 
-def _get_head_or_404(match_id: str) -> tuple[MatchNode, tuple[str, ...]]:
+def _get_head_or_404(match_id: str) -> tuple[MatchNode, tuple[str, ...], tuple[str, ...]]:
     try:
         return store.get_head(match_id)
     except MatchNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"match {match_id!r} not found") from exc
+
+
+def _trigger_and_await(match_id: str) -> tuple[MatchNode, tuple[str, ...], tuple[str, ...], AutoplayStatus]:
+    """Kicks off (or joins, if one is already running) the match's autoplay
+    thread and waits up to AUTOPLAY_GRACE_SECONDS for it to finish, then
+    returns the head as it stands at that point: fully resolved if the bot(s)
+    finished in time, still "thinking" otherwise."""
+    event = store.trigger_autoplay(match_id, _run_autoplay_loop)
+    event.wait(timeout=AUTOPLAY_GRACE_SECONDS)
+    node, player_names, player_types = store.get_head(match_id)
+    return node, player_names, player_types, store.get_status(match_id)
+
+
+def _run_autoplay_loop(match_id: str) -> None:
+    """Plays out consecutive bot turns from the current head until it's a
+    human's turn or the round/match ends. A single human action can hand
+    control to several bot seats in a row, and initial_flip needs more than
+    one action per seat, hence the loop rather than a single bot move. Runs
+    on the background thread started by MatchStore.trigger_autoplay - use
+    `apply_autoplay_action`, not `apply_action`, since this *is* the thread
+    that's allowed to act while status is "thinking"."""
+    node, _player_names, _player_types = store.get_head(match_id)
+    for _ in range(MAX_BOT_AUTOPLAY_STEPS):
+        if node.state.phase in ("round_over", "game_over"):
+            return
+
+        bot = store.get_bot(match_id, node.state.current_player)
+        if bot is None:
+            return
+
+        store.set_thinking(match_id, node.state.current_player)
+        turn = Turn.from_state(node.state)
+        action = bot.choose_action(turn, report_progress=lambda p: store.set_thinking_progress(match_id, p))
+
+        def compute(state: GameState, action: Action = action) -> GameState:
+            return apply_action(state, action)
+
+        node, _player_names, _player_types = store.apply_autoplay_action(match_id, action, compute)
+
+    raise RuntimeError(f"bot auto-play exceeded {MAX_BOT_AUTOPLAY_STEPS} steps for match {match_id!r}")
 
 
 def _resolve_player_names(names: list[str] | None, player_count: int) -> tuple[str, ...]:
@@ -105,3 +184,14 @@ def _resolve_player_names(names: list[str] | None, player_count: int) -> tuple[s
             detail=f"player_names must have exactly player_count ({player_count}) entries",
         )
     return tuple(name.strip() or defaults[i] for i, name in enumerate(names))
+
+
+def _resolve_player_types(types: list[str] | None, player_count: int) -> tuple[str, ...]:
+    if types is None:
+        return tuple("human" for _ in range(player_count))
+    if len(types) != player_count:
+        raise HTTPException(
+            status_code=400,
+            detail=f"player_types must have exactly player_count ({player_count}) entries",
+        )
+    return tuple(types)
