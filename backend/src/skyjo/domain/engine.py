@@ -233,24 +233,27 @@ def _apply_place(state: GameState, position: int) -> GameState:
     board = state.boards[state.current_player]
     old_card = board.cards[position]
     new_cards = _with_position(board.cards, position, Card(value=state.drawn_card, face_up=True))
-    new_board = _clear_completed_columns(replace(board, cards=new_cards), position)
+    new_board, cleared = _clear_completed_columns(replace(board, cards=new_cards), position)
     boards = _with_index(state.boards, state.current_player, new_board)
-    discard = state.discard + (old_card.value,)
+    discard = state.discard + (old_card.value,) + cleared
     return _finish_turn(replace(state, boards=boards, discard=discard, drawn_card=None))
 
 
 def _apply_discard_and_reveal(state: GameState, position: int) -> GameState:
     board = state.boards[state.current_player]
     revealed = replace(board.cards[position], face_up=True)
-    new_board = _clear_completed_columns(
+    new_board, cleared = _clear_completed_columns(
         replace(board, cards=_with_position(board.cards, position, revealed)), position
     )
     boards = _with_index(state.boards, state.current_player, new_board)
-    discard = state.discard + (state.drawn_card,)
+    discard = state.discard + (state.drawn_card,) + cleared
     return _finish_turn(replace(state, boards=boards, discard=discard, drawn_card=None))
 
 
-def _clear_completed_columns(board: PlayerBoard, position: int) -> PlayerBoard:
+def _clear_completed_columns(board: PlayerBoard, position: int) -> tuple[PlayerBoard, tuple[int, ...]]:
+    # A cleared column is discarded, not removed from the game: the three matching
+    # cards go on top of the discard pile, same as any other discarded card, and can
+    # later be reshuffled back into the stock. See _apply_place / _apply_discard_and_reveal.
     col = position % COLUMNS
     positions = (col, col + COLUMNS, col + 2 * COLUMNS)
     cards = [board.cards[p] for p in positions]
@@ -258,8 +261,8 @@ def _clear_completed_columns(board: PlayerBoard, position: int) -> PlayerBoard:
         updated = list(board.cards)
         for p in positions:
             updated[p] = None
-        return replace(board, cards=tuple(updated))
-    return board
+        return replace(board, cards=tuple(updated)), tuple(c.value for c in cards)
+    return board, ()
 
 
 def _finish_turn(state: GameState) -> GameState:

@@ -159,8 +159,38 @@ def test_discard_and_reveal_clears_a_completed_column():
     assert state.boards[0].cards[0] is None
     assert state.boards[0].cards[4] is None
     assert state.boards[0].cards[8] is None
-    assert state.discard[-1] == 42
+    # The drawn card is discarded first, then the cleared column goes on top of it.
+    assert state.discard == (0, 7, 42, 5, 5, 5)
     assert state.current_player == 1
+
+
+def test_place_clears_a_completed_column_and_discards_the_swapped_out_card():
+    board0 = _reveal(_board_from_values([9, 1, 2, 3, 9, 4, 6, 7, 0, 8, 9, 10]), 0, 4)
+    board1 = _board_from_values(list(range(12)))
+    state = _state(
+        (board0, board1), stock=(1,), discard=(0, 7), current_player=0, drawn_card=9, phase="awaiting_placement"
+    )
+
+    state = apply_action(state, Action(ActionType.PLACE, position=8))
+
+    assert state.boards[0].cards[0] is None
+    assert state.boards[0].cards[4] is None
+    assert state.boards[0].cards[8] is None
+    # The card swapped out of position 8 (a 0) is discarded first, then the cleared column.
+    assert state.discard == (0, 7, 0, 9, 9, 9)
+    assert state.current_player == 1
+
+
+def test_place_without_completing_a_column_only_discards_the_swapped_out_card():
+    board0 = _board_from_values(list(range(12)))
+    board1 = _board_from_values(list(range(12)))
+    state = _state(
+        (board0, board1), stock=(1,), discard=(0, 7), current_player=0, drawn_card=99, phase="awaiting_placement"
+    )
+
+    state = apply_action(state, Action(ActionType.PLACE, position=0))
+
+    assert state.discard == (0, 7, 0)
 
 
 # --- round end / scoring -----------------------------------------------------
