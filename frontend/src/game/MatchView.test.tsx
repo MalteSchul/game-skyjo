@@ -243,6 +243,31 @@ describe('MatchView', () => {
     expect(onPlayAgain).toHaveBeenCalledTimes(1)
   })
 
+  it('the toolbar Restart button asks for confirmation mid-game before calling onPlayAgain (happy path)', () => {
+    const onPlayAgain = vi.fn()
+    render(
+      <MatchView
+        match={BASE_MATCH}
+        error={null}
+        busy={false}
+        discardMode={false}
+        onCreate={noop}
+        onDrawStock={noop}
+        onDrawDiscard={noop}
+        onSetDiscardMode={noop}
+        onCardClick={noop}
+        onNextRound={noop}
+        onPlayAgain={onPlayAgain}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /Restart/ }))
+    expect(onPlayAgain).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restart' }))
+    expect(onPlayAgain).toHaveBeenCalledTimes(1)
+  })
+
   describe('keyboard shortcuts', () => {
     const DRAW_MATCH: MatchStateOut = {
       ...BASE_MATCH,
@@ -253,7 +278,7 @@ describe('MatchView', () => {
       ],
     }
 
-    it('draws from the stock and discard pile via "s" and "d" (happy path)', () => {
+    it('draws from the stock and discard pile via "q" and "w" (happy path)', () => {
       const onDrawStock = vi.fn()
       const onDrawDiscard = vi.fn()
       render(
@@ -272,14 +297,14 @@ describe('MatchView', () => {
         />,
       )
 
-      fireEvent.keyDown(window, { key: 's' })
-      fireEvent.keyDown(window, { key: 'd' })
+      fireEvent.keyDown(window, { key: 'q' })
+      fireEvent.keyDown(window, { key: 'w' })
 
       expect(onDrawStock).toHaveBeenCalledTimes(1)
       expect(onDrawDiscard).toHaveBeenCalledTimes(1)
     })
 
-    it('toggles the place/discard-reveal mode with "m" (happy path)', () => {
+    it('selects place/discard-reveal mode with "q"/"w" (happy path)', () => {
       const onSetDiscardMode = vi.fn()
       const placeMatch: MatchStateOut = {
         ...BASE_MATCH,
@@ -306,9 +331,11 @@ describe('MatchView', () => {
         />,
       )
 
-      fireEvent.keyDown(window, { key: 'm' })
+      fireEvent.keyDown(window, { key: 'w' })
+      fireEvent.keyDown(window, { key: 'q' })
 
-      expect(onSetDiscardMode).toHaveBeenCalledWith(true)
+      expect(onSetDiscardMode).toHaveBeenNthCalledWith(1, true)
+      expect(onSetDiscardMode).toHaveBeenNthCalledWith(2, false)
     })
 
     it('starts the next round with "n" and plays again with "p" (happy path)', () => {
@@ -352,6 +379,82 @@ describe('MatchView', () => {
       )
       fireEvent.keyDown(window, { key: 'p' })
       expect(onPlayAgain).toHaveBeenCalledTimes(1)
+    })
+
+    it('confirms before restarting mid-game: "p" opens a confirm dialog, a second "p" restarts (happy path)', () => {
+      const onPlayAgain = vi.fn()
+      render(
+        <MatchView
+          match={DRAW_MATCH}
+          error={null}
+          busy={false}
+          discardMode={false}
+          onCreate={noop}
+          onDrawStock={noop}
+          onDrawDiscard={noop}
+          onSetDiscardMode={noop}
+          onCardClick={noop}
+          onNextRound={noop}
+          onPlayAgain={onPlayAgain}
+        />,
+      )
+
+      fireEvent.keyDown(window, { key: 'p' })
+      expect(onPlayAgain).not.toHaveBeenCalled()
+      expect(screen.getByRole('dialog', { name: 'Restart the game?' })).toBeInTheDocument()
+
+      fireEvent.keyDown(window, { key: 'p' })
+      expect(onPlayAgain).toHaveBeenCalledTimes(1)
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    })
+
+    it('cancels the mid-game restart confirmation with Escape, without restarting (sad path)', () => {
+      const onPlayAgain = vi.fn()
+      render(
+        <MatchView
+          match={DRAW_MATCH}
+          error={null}
+          busy={false}
+          discardMode={false}
+          onCreate={noop}
+          onDrawStock={noop}
+          onDrawDiscard={noop}
+          onSetDiscardMode={noop}
+          onCardClick={noop}
+          onNextRound={noop}
+          onPlayAgain={onPlayAgain}
+        />,
+      )
+
+      fireEvent.keyDown(window, { key: 'p' })
+      expect(screen.getByRole('dialog', { name: 'Restart the game?' })).toBeInTheDocument()
+
+      fireEvent.keyDown(window, { key: 'Escape' })
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+      expect(onPlayAgain).not.toHaveBeenCalled()
+    })
+
+    it('ignores the restart shortcut while busy, to avoid opening the confirm dialog mid-action (bad path)', () => {
+      const onPlayAgain = vi.fn()
+      render(
+        <MatchView
+          match={DRAW_MATCH}
+          error={null}
+          busy
+          discardMode={false}
+          onCreate={noop}
+          onDrawStock={noop}
+          onDrawDiscard={noop}
+          onSetDiscardMode={noop}
+          onCardClick={noop}
+          onNextRound={noop}
+          onPlayAgain={onPlayAgain}
+        />,
+      )
+
+      fireEvent.keyDown(window, { key: 'p' })
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+      expect(onPlayAgain).not.toHaveBeenCalled()
     })
 
     it('opens the shortcuts help on "?" and closes it on Escape (happy path)', () => {
@@ -398,7 +501,7 @@ describe('MatchView', () => {
       )
 
       // BASE_MATCH is in initial_flip: neither drawing nor next-round is legal.
-      fireEvent.keyDown(window, { key: 's' })
+      fireEvent.keyDown(window, { key: 'q' })
       fireEvent.keyDown(window, { key: 'n' })
 
       expect(onDrawStock).not.toHaveBeenCalled()
@@ -423,7 +526,7 @@ describe('MatchView', () => {
         />,
       )
 
-      fireEvent.keyDown(window, { key: 's' })
+      fireEvent.keyDown(window, { key: 'q' })
 
       expect(onDrawStock).not.toHaveBeenCalled()
     })

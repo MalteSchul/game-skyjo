@@ -4,6 +4,7 @@ import CenterPiles from './CenterPiles'
 import KeyboardHelp from './KeyboardHelp'
 import NewMatchForm from './NewMatchForm'
 import PlayerBoard, { BOARD_COLUMNS } from './PlayerBoard'
+import RestartConfirm from './RestartConfirm'
 
 function isTypingTarget(target: EventTarget | null): boolean {
   return target instanceof HTMLElement && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
@@ -69,6 +70,20 @@ function MatchView({
   )
 
   const [helpOpen, setHelpOpen] = useState(false)
+  // Guards the restart shortcut/button while a match is in progress, so a
+  // stray "P" press can't silently discard it. Once the game is over there's
+  // nothing left to lose, so that case skips this and restarts immediately.
+  const [restartConfirmOpen, setRestartConfirmOpen] = useState(false)
+
+  function requestRestart() {
+    if (match?.phase === 'game_over') onPlayAgain()
+    else setRestartConfirmOpen(true)
+  }
+
+  function confirmRestart() {
+    setRestartConfirmOpen(false)
+    onPlayAgain()
+  }
 
   // Roving-tabindex focus cursor for the current player's board. Lives here
   // (not inside PlayerBoard) so arrow keys can be handled as a global
@@ -119,9 +134,10 @@ function MatchView({
     [match, activeClickableList, activeClickablePositions, rovingPosition],
   )
 
-  // Global one-key shortcuts for everything a turn can do: drawing, the
-  // place/discard-reveal mode toggle, round transitions, and moving the
-  // roving-focus cursor between cards.
+  // Global one-key shortcuts for everything a turn can do: drawing (q/w),
+  // the place/discard-reveal mode select (also q/w — drawing and placement
+  // never overlap in phase), round transitions, and moving the roving-focus
+  // cursor between cards.
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (!match || event.ctrlKey || event.metaKey || event.altKey || isTypingTarget(event.target)) return
@@ -133,6 +149,11 @@ function MatchView({
       }
       if (helpOpen) {
         if (event.key === 'Escape') setHelpOpen(false)
+        return
+      }
+      if (restartConfirmOpen) {
+        if (event.key === 'Escape') setRestartConfirmOpen(false)
+        else if (event.key === 'Enter' || event.key.toLowerCase() === 'p') confirmRestart()
         return
       }
       if (busy) return
@@ -159,20 +180,19 @@ function MatchView({
       }
 
       switch (event.key.toLowerCase()) {
-        case 's':
+        case 'q':
           if (canDrawStock) onDrawStock()
+          else if (canToggleMode) onSetDiscardMode(false)
           break
-        case 'd':
+        case 'w':
           if (canDrawDiscard) onDrawDiscard()
-          break
-        case 'm':
-          if (canToggleMode) onSetDiscardMode(!discardMode)
+          else if (canToggleMode) onSetDiscardMode(true)
           break
         case 'n':
           if (match.phase === 'round_over') onNextRound()
           break
         case 'p':
-          if (match.phase === 'game_over') onPlayAgain()
+          requestRestart()
           break
         default:
           break
@@ -185,10 +205,10 @@ function MatchView({
     match,
     busy,
     helpOpen,
+    restartConfirmOpen,
     canDrawStock,
     canDrawDiscard,
     canToggleMode,
-    discardMode,
     moveFocus,
     onDrawStock,
     onDrawDiscard,
@@ -211,11 +231,15 @@ function MatchView({
       {error && <p className="error-banner">{error}</p>}
 
       <div className="match-toolbar">
+        <button type="button" className="restart-trigger" onClick={requestRestart} disabled={busy}>
+          ⟲ Restart <kbd>P</kbd>
+        </button>
         <button type="button" className="shortcuts-trigger" onClick={() => setHelpOpen(true)}>
           ⌨ Shortcuts <kbd>?</kbd>
         </button>
       </div>
       <KeyboardHelp open={helpOpen} onClose={() => setHelpOpen(false)} />
+      <RestartConfirm open={restartConfirmOpen} onConfirm={confirmRestart} onCancel={() => setRestartConfirmOpen(false)} />
 
       <CenterPiles
         stockCount={match.stock_count}

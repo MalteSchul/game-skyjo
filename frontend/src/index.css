@@ -188,6 +188,48 @@ p {
   cursor: default;
 }
 
+.btn-danger {
+  font: inherit;
+  font-weight: 600;
+  font-size: 15px;
+  color: #fff;
+  background: var(--danger);
+  border: none;
+  border-radius: 10px;
+  padding: 11px 22px;
+  cursor: pointer;
+  transition: transform 150ms ease, box-shadow 150ms ease;
+}
+.btn-danger:hover {
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
+}
+.btn-danger:active {
+  transform: translateY(0);
+}
+
+.btn-plain {
+  font: inherit;
+  font-size: 15px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 10px 22px;
+  cursor: pointer;
+  transition: border-color 150ms ease, color 150ms ease;
+}
+.btn-plain:hover {
+  border-color: var(--accent-border);
+  color: var(--text-h);
+}
+
+.restart-confirm-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+}
+
 .field {
   display: flex;
   flex-direction: column;
@@ -513,10 +555,12 @@ p {
 .match-toolbar {
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
   margin-bottom: 4px;
 }
 
-.shortcuts-trigger {
+.shortcuts-trigger,
+.restart-trigger {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -530,10 +574,15 @@ p {
   cursor: pointer;
   transition: border-color 150ms ease, background 150ms ease, color 150ms ease;
 }
-.shortcuts-trigger:hover {
+.shortcuts-trigger:hover,
+.restart-trigger:hover:not(:disabled) {
   border-color: var(--accent-border);
   background: var(--accent-bg);
   color: var(--text-h);
+}
+.restart-trigger:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 kbd {
