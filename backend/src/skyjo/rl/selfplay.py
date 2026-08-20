@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from skyjo.domain.engine import GameState, apply_action, start_next_round
+from skyjo.domain.engine import Action, GameState, apply_action, start_next_round
 from skyjo.domain.observation import Turn
 from skyjo.rl.action_space import pi_to_vector
 from skyjo.rl.mcts import (
@@ -93,6 +93,49 @@ def generate_episode(
         state = apply_action(state, action)
     else:
         raise RuntimeError(f"generate_episode: match did not reach game_over within {max_steps} steps")
+
+    y = np.asarray(final_ranks(state.total_scores), dtype=np.int64)
+    return [ReplaySample(state=s, n_act=n_act, pi=pi_vector, y=y) for s, pi_vector in pending]
+
+
+def generate_bot_episode(
+    initial_state: GameState,
+    choose_action: Sequence[Callable[[Turn], Action]],
+    *,
+    max_steps: int = DEFAULT_MAX_STEPS,
+) -> list[ReplaySample]:
+    """Plays one game to completion with `choose_action[i]` deciding player
+    i's moves directly - e.g. `HeuristicBot(seed=s).choose_action` - instead
+    of MCTS, recording a one-hot `pi` on each bot's actual choice. No search,
+    no network evaluator, so games are cheap and always finish: a fast,
+    reliable source of real win/loss outcomes (`y`, exactly as in
+    `generate_episode`) to warm-start the value head on before switching to
+    real MCTS self-play, without needing to tune MCTS-specific knobs
+    (`num_simulations`, `max_steps`, tau) just to get a first dataset.
+
+    Takes a plain callable per player rather than the `Bot` protocol so
+    `skyjo.rl` doesn't have to depend on `skyjo.bots` - any bot's
+    `choose_action` method already satisfies `Callable[[Turn], Action]` when
+    called positionally (its `report_progress` parameter is keyword-only
+    with a default).
+    """
+    state = initial_state
+    n_act = len(state.boards)
+    pending: list[tuple[GameState, np.ndarray]] = []
+
+    for _ in range(max_steps):
+        if state.phase == "round_over":
+            state = start_next_round(state)
+            continue
+        if state.phase == "game_over":
+            break
+
+        turn = Turn.from_state(state)
+        action = choose_action[turn.acting_player](turn)
+        pending.append((state, pi_to_vector({action: 1.0})))
+        state = apply_action(state, action)
+    else:
+        raise RuntimeError(f"generate_bot_episode: match did not reach game_over within {max_steps} steps")
 
     y = np.asarray(final_ranks(state.total_scores), dtype=np.int64)
     return [ReplaySample(state=s, n_act=n_act, pi=pi_vector, y=y) for s, pi_vector in pending]

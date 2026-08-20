@@ -32,6 +32,7 @@ from skyjo.rl.checkpoint import load_checkpoint
 from skyjo.rl.loop import LoopState, TrainingConfig, run_training_loop
 from skyjo.rl.metrics import MetricsLogger
 from skyjo.rl.network import AlphaZeroNet
+from skyjo.rl.selfplay import DEFAULT_MAX_STEPS
 
 
 def _parse_args() -> argparse.Namespace:
@@ -53,6 +54,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--l2-coef", type=float, default=1e-4)
     parser.add_argument("--trunk-dim", type=int, default=256)
     parser.add_argument("--residual-blocks", type=int, default=4)
+    parser.add_argument(
+        "--max-steps-per-episode",
+        type=int,
+        default=DEFAULT_MAX_STEPS,
+        help="cap on decision points per self-play game before it's abandoned as failed. "
+        "Lower this to fail a stuck/looping game faster rather than burn wall-clock on it "
+        "before the resilience skip kicks in.",
+    )
     parser.add_argument(
         "--workers",
         type=int,
@@ -81,6 +90,7 @@ def main() -> None:
         c_puct=args.c_puct,
         dirichlet_alpha=args.dirichlet_alpha,
         dirichlet_epsilon=args.dirichlet_epsilon,
+        max_steps_per_episode=args.max_steps_per_episode,
         buffer_capacity=args.buffer_capacity,
         batch_size=args.batch_size,
         train_steps_per_iteration=args.train_steps_per_iteration,

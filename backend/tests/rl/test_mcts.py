@@ -46,7 +46,9 @@ def _board_from_values(values, *, face_up: bool = False) -> PlayerBoard:
 def test_root_total_visit_count_equals_num_simulations():
     state = new_match(player_count=3, seed=1)
 
-    root = run_mcts(Turn.from_state(state), _uniform_evaluate, num_simulations=25, rng=np.random.default_rng(0))
+    root = run_mcts(
+        Turn.from_state(state), _uniform_evaluate, num_simulations=25, rng=np.random.default_rng(0)
+    )
 
     assert root.visit_count == 25
 
@@ -123,7 +125,9 @@ def test_on_root_ready_hands_back_the_same_live_object_run_mcts_returns():
 def test_on_root_ready_is_optional():
     state = new_match(player_count=2, seed=1)
 
-    root = run_mcts(Turn.from_state(state), _uniform_evaluate, num_simulations=2, rng=np.random.default_rng(0))
+    root = run_mcts(
+        Turn.from_state(state), _uniform_evaluate, num_simulations=2, rng=np.random.default_rng(0)
+    )
 
     assert root.visit_count == 2
 
@@ -159,13 +163,25 @@ def test_root_noise_only_perturbs_priors_for_legal_actions_and_still_sums_to_one
         state = apply_action(state, engine_legal_actions(state)[0])
     turn = Turn.from_state(state)
 
-    noisy = run_mcts(turn, _uniform_evaluate, num_simulations=0, add_root_noise=True, rng=np.random.default_rng(1))
-    clean = run_mcts(turn, _uniform_evaluate, num_simulations=0, add_root_noise=False, rng=np.random.default_rng(1))
+    noisy = run_mcts(
+        turn,
+        _uniform_evaluate,
+        num_simulations=0,
+        add_root_noise=True,
+        rng=np.random.default_rng(1),
+    )
+    clean = run_mcts(
+        turn,
+        _uniform_evaluate,
+        num_simulations=0,
+        add_root_noise=False,
+        rng=np.random.default_rng(1),
+    )
 
     assert set(noisy.edges.keys()) == set(clean.edges.keys())
-    assert any(
-        abs(noisy.edges[a].prior - clean.edges[a].prior) > 1e-9 for a in clean.edges
-    ), "noise should change at least one legal action's prior"
+    assert any(abs(noisy.edges[a].prior - clean.edges[a].prior) > 1e-9 for a in clean.edges), (
+        "noise should change at least one legal action's prior"
+    )
     assert sum(e.prior for e in noisy.edges.values()) == pytest.approx(1.0)
 
 
@@ -184,7 +200,10 @@ def test_select_edge_uses_the_node_current_players_q_component_not_always_player
         favors_player_1 = MCTSEdge(action=engine_legal_actions(node_state)[1], prior=0.5, n_act=2)
         favors_player_1.visit_count = 1
         favors_player_1.value_sum = np.array([0.0, 10.0])
-        node.edges = {favors_player_0.action: favors_player_0, favors_player_1.action: favors_player_1}
+        node.edges = {
+            favors_player_0.action: favors_player_0,
+            favors_player_1.action: favors_player_1,
+        }
         return node
 
     root_node = node_with_edges(current_player=0)
@@ -225,7 +244,9 @@ def test_final_ranks_breaks_ties_by_lower_player_index():
 
 def test_visit_distribution_sums_to_one_and_favors_more_visited_actions():
     state = new_match(player_count=2, seed=3)
-    root = run_mcts(Turn.from_state(state), _uniform_evaluate, num_simulations=20, rng=np.random.default_rng(0))
+    root = run_mcts(
+        Turn.from_state(state), _uniform_evaluate, num_simulations=20, rng=np.random.default_rng(0)
+    )
 
     pi = visit_distribution(root, tau=1.0)
 
@@ -236,7 +257,9 @@ def test_visit_distribution_sums_to_one_and_favors_more_visited_actions():
 
 def test_visit_distribution_near_zero_tau_is_one_hot_on_the_most_visited_action():
     state = new_match(player_count=2, seed=3)
-    root = run_mcts(Turn.from_state(state), _uniform_evaluate, num_simulations=20, rng=np.random.default_rng(0))
+    root = run_mcts(
+        Turn.from_state(state), _uniform_evaluate, num_simulations=20, rng=np.random.default_rng(0)
+    )
 
     pi = visit_distribution(root, tau=1e-6)
 
@@ -276,7 +299,9 @@ def test_repeated_visits_to_a_reveal_edge_sample_more_than_one_value():
     flip_action = next(a for a in root.edges if a.type is ActionType.FLIP_INITIAL)
     chance = root.edges[flip_action].child
     assert isinstance(chance, ChanceNode)
-    assert len(chance.edges) > 1, "60 simulations through ~149 unknown cards should not all sample the same value"
+    assert len(chance.edges) > 1, (
+        "60 simulations through ~149 unknown cards should not all sample the same value"
+    )
 
 
 def test_chance_node_never_offers_a_value_with_zero_remaining_count():

@@ -21,9 +21,11 @@ and deterministic.
 from __future__ import annotations
 
 import time
+import traceback
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -139,6 +141,7 @@ class _SelfPlayJob:
     dirichlet_alpha: float
     dirichlet_epsilon: float
     max_steps: int
+    failure_log_path: str
 
 
 # Set by `_init_worker`, either in a subprocess (parallel self-play) or
@@ -153,26 +156,70 @@ def _init_worker(state_dict: dict[str, torch.Tensor], network_kwargs: dict[str, 
     _worker_evaluate = make_network_evaluator(net)
 
 
+def _log_failure(job: _SelfPlayJob, exc: Exception) -> None:
+    """Appends a full traceback to `job.failure_log_path` and prints a
+    one-line summary. The file (not just stdout) is what makes a crash
+    diagnosable after the fact - a `ProcessPoolExecutor` worker's stdout has
+    nowhere durable to go, so a failure that isn't logged here leaves no
+    trace once its console scrolls away.
+
+    Concurrent workers may append to this file at nearly the same time; each
+    append is a single `write` call (open/write/close, not a kept-open
+    handle) which is atomic in practice for a traceback-sized write, and an
+    occasional interleaving would only garble one diagnostic entry, never
+    the training run itself.
+    """
+    summary = f"_play_one_game: seed={job.seed} player_count={job.player_count} failed, skipping: {exc}"
+    print(summary)
+    with open(job.failure_log_path, "a", encoding="utf-8") as f:
+        f.write(f"--- {datetime.now(UTC).isoformat()} {summary}\n")
+        f.write(traceback.format_exc())
+        f.write("\n")
+
+
 def _play_one_game(job: _SelfPlayJob) -> list[ReplaySample]:
+    """Returns `[]` (never raises) if this one game fails - a still-unresolved,
+    rare `hidden_info` bookkeeping bug (see rl/hidden_info.py), a game that
+    runs past `max_steps`, or any other bug in the self-play path can
+    otherwise take down an entire iteration's worth of sibling games (or, in
+    the `workers>1` pool, the whole training process) over one unlucky
+    sample. A long unattended run should degrade to "one game's data is
+    missing" rather than crash outright; `run_training_loop` surfaces how
+    often this happens via the `self_play/failed_games` metric, and
+    `_log_failure` writes the full traceback to `job.failure_log_path` so a
+    root-cause fix later has something to confirm against instead of just an
+    aggregate count.
+
+    Catches `Exception` broadly rather than the two types actually expected
+    (`AssertionError` from `hidden_info`'s conservation check, `RuntimeError`
+    from hitting `max_steps`) - a narrower catch only protects against
+    failure modes already anticipated, and the whole point of this guard is
+    surviving the ones that aren't. `BaseException` subclasses like
+    `KeyboardInterrupt` are deliberately left uncaught.
+    """
     if _worker_evaluate is None:
         raise RuntimeError("_play_one_game: worker was not initialized via _init_worker")
     rng = np.random.default_rng(job.seed)
     initial_state = new_match(player_count=job.player_count, seed=job.seed)
     tau_schedule = make_tau_schedule(job.tau_moves, job.tau_high, job.tau_low)
-    return generate_episode(
-        initial_state,
-        _worker_evaluate,
-        num_simulations=job.num_simulations,
-        tau_schedule=tau_schedule,
-        c_puct=job.c_puct,
-        dirichlet_alpha=job.dirichlet_alpha,
-        dirichlet_epsilon=job.dirichlet_epsilon,
-        rng=rng,
-        max_steps=job.max_steps,
-    )
+    try:
+        return generate_episode(
+            initial_state,
+            _worker_evaluate,
+            num_simulations=job.num_simulations,
+            tau_schedule=tau_schedule,
+            c_puct=job.c_puct,
+            dirichlet_alpha=job.dirichlet_alpha,
+            dirichlet_epsilon=job.dirichlet_epsilon,
+            rng=rng,
+            max_steps=job.max_steps,
+        )
+    except Exception as exc:  # noqa: BLE001 - deliberately blind, see docstring above
+        _log_failure(job, exc)
+        return []
 
 
-def _build_jobs(config: TrainingConfig, rng: np.random.Generator) -> list[_SelfPlayJob]:
+def _build_jobs(config: TrainingConfig, rng: np.random.Generator, failure_log_path: str) -> list[_SelfPlayJob]:
     player_counts = rng.integers(config.min_players, config.max_players + 1, size=config.games_per_iteration)
     seeds = rng.integers(0, 2**31 - 1, size=config.games_per_iteration)
     return [
@@ -187,6 +234,7 @@ def _build_jobs(config: TrainingConfig, rng: np.random.Generator) -> list[_SelfP
             dirichlet_alpha=config.dirichlet_alpha,
             dirichlet_epsilon=config.dirichlet_epsilon,
             max_steps=config.max_steps_per_episode,
+            failure_log_path=failure_log_path,
         )
         for seed, player_count in zip(seeds, player_counts, strict=True)
     ]
@@ -194,23 +242,31 @@ def _build_jobs(config: TrainingConfig, rng: np.random.Generator) -> list[_SelfP
 
 def run_self_play_iteration(
     net: AlphaZeroNet, config: TrainingConfig, jobs: list[_SelfPlayJob]
-) -> list[ReplaySample]:
+) -> tuple[list[ReplaySample], int]:
+    """Returns (samples, failed_game_count). A real completed Skyjo game
+    always yields multiple decision points, so an empty per-job result
+    unambiguously means `_play_one_game` caught a failure for that job, not
+    a legitimately tiny game.
+    """
     state_dict = {k: v.detach().cpu() for k, v in net.state_dict().items()}
 
     if config.workers <= 1:
         _init_worker(state_dict, config.network_kwargs)
-        samples: list[ReplaySample] = []
-        for job in jobs:
-            samples.extend(_play_one_game(job))
-        return samples
+        episode_results = [_play_one_game(job) for job in jobs]
+    else:
+        with ProcessPoolExecutor(
+            max_workers=config.workers, initializer=_init_worker, initargs=(state_dict, config.network_kwargs)
+        ) as pool:
+            episode_results = list(pool.map(_play_one_game, jobs))
 
-    samples = []
-    with ProcessPoolExecutor(
-        max_workers=config.workers, initializer=_init_worker, initargs=(state_dict, config.network_kwargs)
-    ) as pool:
-        for episode_samples in pool.map(_play_one_game, jobs):
+    samples: list[ReplaySample] = []
+    failed_games = 0
+    for episode_samples in episode_results:
+        if episode_samples:
             samples.extend(episode_samples)
-    return samples
+        else:
+            failed_games += 1
+    return samples, failed_games
 
 
 def run_training_loop(
@@ -230,20 +286,23 @@ def run_training_loop(
     # is exploration noise, not something training correctness depends on.
     rng = np.random.default_rng(config.seed + state.iteration)
     min_buffer_size = config.min_buffer_size if config.min_buffer_size is not None else config.batch_size
+    failure_log_path = str(metrics.log_dir / "self_play_failures.log")
 
     for _ in range(state.iteration, config.iterations):
         step = state.iteration
 
         self_play_start = time.monotonic()
-        jobs = _build_jobs(config, rng)
-        samples = run_self_play_iteration(net, config, jobs)
+        jobs = _build_jobs(config, rng, failure_log_path)
+        samples, failed_games = run_self_play_iteration(net, config, jobs)
         for sample in samples:
             buffer.add(sample)
+        successful_games = max(config.games_per_iteration - failed_games, 1)
         metrics.log(
             step,
             {
                 "self_play/samples_generated": len(samples),
-                "self_play/avg_moves_per_game": len(samples) / config.games_per_iteration,
+                "self_play/avg_moves_per_game": len(samples) / successful_games,
+                "self_play/failed_games": failed_games,
                 "self_play/seconds": time.monotonic() - self_play_start,
                 "buffer/size": len(buffer),
             },

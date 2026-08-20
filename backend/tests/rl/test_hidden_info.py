@@ -107,6 +107,24 @@ def test_unknown_card_counts_matches_hidden_plus_stock_by_conservation():
     assert total_unknown == hidden_board_cards + len(state.stock)
 
 
+def test_unknown_card_counts_excludes_the_drawn_card():
+    # Regression: the drawn card is already resolved to a real value (via
+    # its own earlier reveal), but sits in `drawn_card` rather than `boards`
+    # or `discard` until placed/discarded. Omitting it here let the same
+    # value be sampled again for some other hidden card - see
+    # resolve_round_close's counterpart test below for the concrete failure.
+    board = _board_from_values([HIDDEN_SENTINEL] * 12)
+    state = _state((board, board), discard=(1, 2), drawn_card=5, phase="awaiting_placement")
+
+    counts = unknown_card_counts(Turn.from_state(state))
+
+    expected = Counter(dict(CARD_COUNTS))
+    expected[1] -= 1
+    expected[2] -= 1
+    expected[5] -= 1
+    assert counts == expected
+
+
 def test_sample_reveal_raises_when_the_pool_is_exhausted():
     with pytest.raises(ValueError):
         sample_reveal(Counter({5: 0, 7: -1}), np.random.default_rng(0))
@@ -262,6 +280,20 @@ def test_resolve_round_close_excludes_an_already_resolved_slot_from_the_pool():
         if (player, position) != (0, 0)
     ]
     assert -2 not in other_values
+
+
+def test_resolve_round_close_excludes_the_drawn_card_from_the_pool():
+    board0 = _board_from_values([HIDDEN_SENTINEL] * 12)
+    board1 = _board_from_values([HIDDEN_SENTINEL] * 12)
+    # -2 has 5 total copies: 4 already in discard, the 5th is the drawn card
+    # in the current player's hand - known, but not yet placed or discarded,
+    # so none should be left for the pool that fills every other hidden slot.
+    state = _state((board0, board1), discard=(-2, -2, -2, -2), drawn_card=-2)
+
+    resolved = resolve_round_close(state, np.random.default_rng(0))
+
+    all_values = [card.value for board in resolved.boards for card in board.cards]
+    assert -2 not in all_values
 
 
 # --- rescrub -----------------------------------------------------------------

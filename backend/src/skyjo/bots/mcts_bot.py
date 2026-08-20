@@ -8,15 +8,13 @@ The network every seat shares is built once per process by
 `AlphaZeroNet` isn't free, and a fresh one per seat would also mean two
 mcts_bot seats in the same match couldn't share warm state.
 
-Known pre-existing issue (not introduced here - `MctsBot` only calls
-`run_mcts` the same way `rl.selfplay.generate_episode` already does): over a
-long enough real game, `rl.hidden_info`'s public/unknown card bookkeeping can
-become inconsistent and trip the AssertionError in
-`hidden_info._unknown_from_boards_and_discard`. Reproduced with two mcts_bots
-playing many real turns at num_simulations=20; not yet root-caused. Until
-fixed, a match with an mcts_bot seat can rarely get stuck mid-game (the
-autoplay thread dies, the match stays "idle" but that seat's turn never
-resolves) rather than serving a clean error.
+Previously, over a long enough real game, `rl.hidden_info`'s public/unknown
+card bookkeeping could become inconsistent and trip the AssertionError in
+`hidden_info._unknown_from_boards_and_discard` - root-caused to
+`unknown_card_counts` never excluding the drawn card (already resolved to a
+real value, but not yet in `boards`/`discard`) from the "still unknown" pool,
+letting the same value get sampled again for another hidden card. Fixed by
+excluding it (see `hidden_info.unknown_card_counts`).
 """
 
 from __future__ import annotations
@@ -25,18 +23,19 @@ import functools
 import os
 
 import numpy as np
-import torch
 
 from skyjo.bots.base import ProgressReporter
 from skyjo.domain.engine import Action
 from skyjo.domain.observation import Turn
+from skyjo.rl.checkpoint import load_checkpoint
 from skyjo.rl.evaluator import make_network_evaluator
 from skyjo.rl.mcts import DEFAULT_C_PUCT, EvaluateFn, run_mcts
 from skyjo.rl.network import AlphaZeroNet
 
-# If set, default_evaluator() loads this checkpoint instead of using a
-# freshly-initialized (untrained) network. Produce one with
-# skyjo.rl.train/selfplay; nothing in this repo writes one yet.
+# If set, default_evaluator() loads this checkpoint (the format
+# skyjo.rl.checkpoint.save_checkpoint writes, e.g. scripts/train_mcts.py's
+# --checkpoint-dir/latest.pt) instead of using a freshly-initialized
+# (untrained) network.
 CHECKPOINT_PATH_ENV_VAR = "SKYJO_MCTS_CHECKPOINT_PATH"
 
 # Overrides DEFAULT_NUM_SIMULATIONS below - the right value depends on host
@@ -54,7 +53,7 @@ def default_evaluator() -> EvaluateFn:
     net = AlphaZeroNet()
     checkpoint_path = os.environ.get(CHECKPOINT_PATH_ENV_VAR)
     if checkpoint_path:
-        net.load_state_dict(torch.load(checkpoint_path, map_location="cpu"))
+        load_checkpoint(checkpoint_path, net)
     return make_network_evaluator(net)
 
 

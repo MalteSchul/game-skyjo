@@ -1,10 +1,11 @@
 import numpy as np
 import pytest
 
+from skyjo.bots.heuristic_bot import HeuristicBot
 from skyjo.domain.engine import legal_actions as engine_legal_actions
 from skyjo.domain.engine import new_match
-from skyjo.rl.action_space import ACTION_SPACE_SIZE
-from skyjo.rl.selfplay import generate_episode
+from skyjo.rl.action_space import ACTION_SPACE_SIZE, action_to_index
+from skyjo.rl.selfplay import generate_bot_episode, generate_episode
 
 
 def _uniform_evaluate(state):
@@ -69,3 +70,55 @@ def test_generate_episode_raises_if_the_match_does_not_finish_within_max_steps()
 
     with pytest.raises(RuntimeError):
         generate_episode(state, _uniform_evaluate, num_simulations=1, rng=np.random.default_rng(0), max_steps=1)
+
+
+# --- generate_bot_episode --------------------------------------------------
+
+
+def test_generate_bot_episode_produces_one_hot_pi_matching_the_bots_actual_choices():
+    state = new_match(player_count=2, seed=1)
+    bots = [HeuristicBot(seed=1), HeuristicBot(seed=2)]
+
+    samples = generate_bot_episode(state, [b.choose_action for b in bots], max_steps=3000)
+
+    assert len(samples) > 0
+    for sample in samples:
+        assert sample.n_act == 2
+        assert sample.pi.shape == (ACTION_SPACE_SIZE,)
+        # one-hot: exactly one action carries all the probability mass
+        assert sample.pi.sum() == pytest.approx(1.0, abs=1e-6)
+        assert np.count_nonzero(sample.pi) == 1
+    assert sorted(samples[-1].y.tolist()) == [0, 1]
+
+
+def test_generate_bot_episode_pi_is_always_a_legal_action_for_its_own_state():
+    state = new_match(player_count=3, seed=3)
+    bots = [HeuristicBot(seed=1), HeuristicBot(seed=2), HeuristicBot(seed=3)]
+
+    samples = generate_bot_episode(state, [b.choose_action for b in bots], max_steps=3000)
+
+    for sample in samples:
+        legal_indices = {action_to_index(a) for a in engine_legal_actions(sample.state)}
+        chosen_index = int(np.argmax(sample.pi))
+        assert chosen_index in legal_indices
+
+
+def test_generate_bot_episode_is_deterministic_for_the_same_seeded_bots():
+    def play(seed: int) -> list[int]:
+        state = new_match(player_count=2, seed=seed)
+        bots = [HeuristicBot(seed=1), HeuristicBot(seed=2)]
+        samples = generate_bot_episode(state, [b.choose_action for b in bots], max_steps=3000)
+        return [int(np.argmax(s.pi)) for s in samples]
+
+    assert play(7) == play(7)
+
+
+# --- bad path ------------------------------------------------------------
+
+
+def test_generate_bot_episode_raises_if_the_match_does_not_finish_within_max_steps():
+    state = new_match(player_count=2, seed=1)
+    bots = [HeuristicBot(seed=1), HeuristicBot(seed=2)]
+
+    with pytest.raises(RuntimeError):
+        generate_bot_episode(state, [b.choose_action for b in bots], max_steps=1)

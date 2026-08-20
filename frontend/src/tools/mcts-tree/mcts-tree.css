@@ -1,0 +1,891 @@
+/* MCTS Tree Explorer — a developer tool for inspecting `dump_mcts_tree.py`
+ * exports. Reuses the game's own design tokens (--text, --bg, --accent,
+ * --danger, --mono, the --tone-* card bands from cardTone.ts) for visual
+ * consistency, and adds a small set of its own tokens (a "good" counterpart
+ * to --danger, and a fixed player-identity palette) scoped under
+ * `.mcts-explorer` so they never leak into the game UI. This page is a dense
+ * data table, not the game board, so it opts the shared #root out of the
+ * game's fixed 1126px centered column — see the `body.mcts-tools-page`
+ * override below, toggled by McTreeExplorerPage itself. */
+
+body.mcts-tools-page #root {
+  width: 100%;
+  max-width: 100%;
+  text-align: left;
+  border-inline: none;
+  min-height: 100vh;
+}
+
+.mcts-explorer {
+  --mtx-good: #0f7a4f;
+  --mtx-good-bg: rgba(15, 122, 79, 0.1);
+  --mtx-good-border: rgba(15, 122, 79, 0.35);
+
+  --mtx-player-0: #2a78d6;
+  --mtx-player-1: #d9701f;
+  --mtx-player-2: #1baf7a;
+  --mtx-player-3: #b5860a;
+  --mtx-player-4: #d1548a;
+  --mtx-player-5: #4f9d1f;
+  --mtx-player-6: #6a4ed1;
+  --mtx-player-7: #d1433f;
+
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  font-size: 15px;
+  text-align: left;
+}
+
+@media (prefers-color-scheme: dark) {
+  .mcts-explorer {
+    --mtx-good: #3fcf94;
+    --mtx-good-bg: rgba(63, 207, 148, 0.14);
+    --mtx-good-border: rgba(63, 207, 148, 0.4);
+
+    --mtx-player-0: #5b9ee8;
+    --mtx-player-1: #e8964f;
+    --mtx-player-2: #3fcf94;
+    --mtx-player-3: #d9b23c;
+    --mtx-player-4: #e685ac;
+    --mtx-player-5: #7cc94a;
+    --mtx-player-6: #9683ea;
+    --mtx-player-7: #e8756f;
+  }
+}
+
+.mcts-explorer * {
+  box-sizing: border-box;
+}
+
+.mcts-explorer .mtx-mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- topbar ---------- */
+
+.mtx-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  position: sticky;
+  top: 0;
+  z-index: 40;
+}
+.mtx-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.mtx-brand .mtx-mark {
+  font-size: 22px;
+}
+.mtx-brand h1 {
+  font-size: 19px;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+.mtx-brand .mtx-tagline {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.mtx-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.mtx-file-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 12px 5px 10px;
+  max-width: 320px;
+}
+.mtx-file-pill .mtx-fname {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--mono);
+}
+
+/* ---------- buttons ---------- */
+
+.mtx-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg);
+  color: var(--text-h);
+  border-radius: 8px;
+  padding: 8px 13px;
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 150ms ease, border-color 150ms ease;
+}
+.mtx-btn:hover:not(:disabled) {
+  background: var(--code-bg);
+}
+.mtx-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.mtx-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.mtx-btn-primary:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+.mtx-btn-ghost {
+  border-color: transparent;
+  background: transparent;
+}
+.mtx-btn-ghost:hover:not(:disabled) {
+  background: var(--code-bg);
+}
+.mtx-btn-small {
+  padding: 5px 9px;
+  font-size: 12px;
+}
+
+/* ---------- empty state / loader ---------- */
+
+.mtx-empty-state {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+}
+.mtx-dropzone {
+  width: min(640px, 100%);
+  border: 1.5px dashed var(--border-strong);
+  border-radius: 16px;
+  background: var(--bg-panel);
+  padding: 44px 36px;
+  text-align: center;
+  transition: border-color 150ms ease, background 150ms ease;
+}
+.mtx-dropzone.mtx-drag-over {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.mtx-dropzone .mtx-glyph {
+  font-size: 36px;
+  margin-bottom: 6px;
+}
+.mtx-dropzone h2 {
+  font-size: 22px;
+  margin: 0 0 8px;
+}
+.mtx-dropzone p {
+  color: var(--text);
+  font-size: 14.5px;
+  max-width: 46ch;
+  margin: 0 auto 18px;
+}
+.mtx-dropzone .mtx-hint {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12.5px;
+  text-align: left;
+}
+.mtx-dropzone .mtx-hint code {
+  font-family: var(--mono);
+  background: var(--code-bg);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.mtx-error-line {
+  margin-top: 14px;
+  color: var(--danger);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: 10px;
+  padding: 10px 13px;
+  font-size: 13px;
+  text-align: left;
+}
+
+/* ---------- workspace layout ---------- */
+
+.mtx-workspace {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.mtx-rail {
+  width: 280px;
+  flex: none;
+  border-right: 1px solid var(--border);
+  background: var(--bg-panel);
+  padding: 16px 14px 40px;
+  overflow-y: auto;
+}
+.mtx-rail-section {
+  margin-bottom: 18px;
+}
+.mtx-rail-section > summary {
+  list-style: none;
+  cursor: pointer;
+  font-family: var(--heading);
+  font-weight: 700;
+  font-size: 12.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 4px 2px 8px;
+}
+.mtx-rail-section > summary::-webkit-details-marker {
+  display: none;
+}
+.mtx-field-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 5px;
+  display: block;
+}
+.mtx-rail select,
+.mtx-rail input[type='text'] {
+  width: 100%;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 8px 9px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text-h);
+}
+.mtx-checkline {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  color: var(--text);
+  margin-top: 10px;
+}
+.mtx-checkline input {
+  accent-color: var(--accent);
+}
+.mtx-legend-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  font-size: 12.5px;
+  color: var(--text);
+}
+.mtx-legend-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.mtx-legend-swatch {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  margin-top: 1px;
+}
+.mtx-legend-key {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-h);
+  background: var(--code-bg);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.mtx-chip-row {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+/* ---------- canvas ---------- */
+
+.mtx-canvas {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: 20px 24px 80px;
+}
+
+.mtx-stat-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.mtx-stat-tile {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 13px 15px;
+}
+.mtx-stat-tile .mtx-label {
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.mtx-stat-tile .mtx-value {
+  font-family: var(--mono);
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-h);
+}
+.mtx-stat-tile .mtx-sub {
+  font-size: 12px;
+  color: var(--text);
+  margin-top: 3px;
+}
+.mtx-stat-tile .mtx-value.mtx-good-text {
+  color: var(--mtx-good);
+}
+.mtx-stat-tile .mtx-value.mtx-critical-text {
+  color: var(--danger);
+}
+
+.mtx-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.mtx-toolbar .mtx-spacer {
+  flex: 1;
+}
+.mtx-search-input {
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 8px 11px;
+  font: inherit;
+  font-size: 13px;
+  width: 220px;
+}
+
+.mtx-tree-shell {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 20px;
+}
+
+/* ---------- node / edge rows ---------- */
+
+.mtx-node-block {
+}
+.mtx-node-header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+  padding: 11px 13px;
+}
+.mtx-node-header-actions {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: auto;
+}
+.mtx-node-children {
+  padding-left: 30px;
+  border-left: 1px dashed var(--border);
+  margin-left: 22px;
+}
+
+.mtx-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+.mtx-pill-player {
+  color: #fff;
+}
+.mtx-pill-phase {
+  background: var(--code-bg);
+  color: var(--text);
+  font-weight: 500;
+}
+.mtx-pill-terminal {
+  background: var(--border);
+  color: var(--text-h);
+}
+.mtx-pill-chance {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px dashed var(--border-strong);
+  font-weight: 500;
+}
+.mtx-visit-badge {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+/* the whole clickable edge row, now a real <button> so it's keyboard
+   accessible — reset browser button chrome, keep the grid layout */
+.mtx-cols-decision,
+.mtx-cols-chance {
+  display: grid;
+  align-items: center;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: var(--text-h);
+  background: none;
+  border: none;
+  border-top: 1px solid var(--border);
+  padding: 8px 13px;
+  cursor: pointer;
+}
+.mtx-cols-decision {
+  grid-template-columns: 22px minmax(170px, 1.6fr) minmax(140px, 1fr) 74px 78px 62px 78px minmax(100px, 140px);
+  column-gap: 12px;
+}
+.mtx-cols-chance {
+  grid-template-columns: 22px 78px minmax(140px, 1fr) 74px minmax(100px, 140px);
+  column-gap: 12px;
+}
+.mtx-edge-row-main:hover:not(:disabled) {
+  background: var(--code-bg);
+}
+.mtx-edge-row-main:disabled {
+  cursor: default;
+}
+.mtx-edge-row-main:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.mtx-edge-row.mtx-dimmed .mtx-edge-row-main {
+  opacity: 0.35;
+}
+
+.mtx-col-header {
+  background: var(--code-bg);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 13px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+.mtx-col-header span.mtx-num {
+  text-align: right;
+}
+
+.mtx-chevron {
+  color: var(--text-muted);
+  font-size: 12px;
+  display: inline-block;
+  width: 12px;
+  transition: transform 120ms ease;
+}
+.mtx-chevron-open {
+  transform: rotate(90deg);
+}
+.mtx-chevron-leaf {
+  visibility: hidden;
+}
+
+.mtx-action-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13.5px;
+  overflow: hidden;
+}
+.mtx-action-txt {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mtx-badge-star {
+  color: var(--accent);
+  font-size: 13px;
+}
+.mtx-badge-bolt {
+  color: var(--mtx-player-3);
+  font-size: 12px;
+}
+
+.mtx-bar-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mtx-bar-track {
+  position: relative;
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--border);
+  overflow: hidden;
+}
+.mtx-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--accent);
+  border-radius: 4px;
+}
+.mtx-bar-num {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--text);
+  min-width: 30px;
+  text-align: right;
+  flex: none;
+}
+
+.mtx-num-cell {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  text-align: right;
+  color: var(--text-h);
+}
+.mtx-num-cell.mtx-muted {
+  color: var(--text-muted);
+}
+.mtx-num-cell.mtx-best {
+  font-weight: 700;
+  color: var(--accent);
+}
+.mtx-good-text {
+  color: var(--mtx-good);
+}
+.mtx-critical-text {
+  color: var(--danger);
+}
+.mtx-delta {
+  display: block;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+.mtx-delta-up {
+  color: var(--mtx-good);
+}
+.mtx-delta-down {
+  color: var(--danger);
+}
+
+.mtx-empty-note {
+  padding: 16px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* ---------- diverging meter & value strip ---------- */
+
+.mtx-div-meter {
+  position: relative;
+  height: 9px;
+  border-radius: 4px;
+  background: var(--border);
+  width: 100%;
+}
+.mtx-div-meter::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: -2px;
+  bottom: -2px;
+  width: 1px;
+  background: var(--border-strong);
+}
+.mtx-div-meter-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 4px;
+}
+.mtx-good {
+  background: var(--mtx-good);
+}
+.mtx-critical {
+  background: var(--danger);
+}
+
+.mtx-value-strip {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.mtx-value-chip {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  position: relative;
+  background: var(--border);
+  overflow: hidden;
+}
+.mtx-value-chip-active {
+  outline: 2px solid var(--player-color, var(--accent));
+  outline-offset: 1px;
+}
+.mtx-value-chip-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  border-radius: 2px;
+}
+.mtx-good-fill {
+  background: var(--mtx-good);
+}
+.mtx-critical-fill {
+  background: var(--danger);
+}
+
+/* ---------- value panel ---------- */
+
+.mtx-value-panel {
+  margin: 6px 13px 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--code-bg);
+}
+.mtx-value-panel-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 9px;
+}
+.mtx-value-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.mtx-value-row {
+  display: grid;
+  grid-template-columns: 32px minmax(80px, 1fr) 60px;
+  gap: 10px;
+  align-items: center;
+}
+.mtx-value-row-label {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+.mtx-value-row-num {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  text-align: right;
+}
+
+.mtx-rankprobs-wrap {
+  margin-top: 12px;
+}
+.mtx-rankprobs-caption {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.mtx-rankprobs-table {
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.mtx-rankprobs-table th,
+.mtx-rankprobs-table td {
+  padding: 4px 9px;
+  text-align: right;
+  border: 1px solid var(--border);
+}
+.mtx-rankprobs-table th {
+  color: var(--text-muted);
+  font-weight: 500;
+  background: var(--bg-panel);
+}
+.mtx-rankprobs-table td {
+  background: color-mix(in oklab, var(--accent) calc(var(--w, 0) * 55%), var(--bg-panel));
+  color: var(--text-h);
+}
+
+/* ---------- snapshot scrubber ---------- */
+
+.mtx-scrubber {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 18px 10px;
+  margin-bottom: 16px;
+}
+.mtx-scrubber-top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+.mtx-scrubber-label {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-h);
+  min-width: 140px;
+}
+.mtx-scrubber-range {
+  flex: 1;
+  accent-color: var(--accent);
+  height: 22px;
+}
+.mtx-scrubber-ticks {
+  position: relative;
+  height: 18px;
+  margin: 0 11px;
+}
+.mtx-scrubber-tick {
+  position: absolute;
+  transform: translateX(-50%);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.mtx-scrubber-tick.mtx-scrubber-tick-active {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* ---------- move preference chart ---------- */
+
+.mtx-chart-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 18px 14px;
+  margin-bottom: 20px;
+}
+.mtx-chart-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.mtx-chart-title {
+  font-size: 14.5px;
+  font-weight: 700;
+  color: var(--text-h);
+}
+.mtx-chart-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.mtx-chart-svg-wrap {
+  overflow-x: auto;
+}
+.mtx-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-top: 10px;
+}
+.mtx-chart-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text);
+}
+.mtx-chart-legend-swatch {
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+}
+.mtx-chart-tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  box-shadow: var(--shadow-sm);
+  min-width: 150px;
+  z-index: 5;
+}
+.mtx-chart-tooltip-n {
+  font-family: var(--mono);
+  font-weight: 700;
+  color: var(--text-h);
+  margin-bottom: 5px;
+}
+.mtx-chart-tooltip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: space-between;
+}
+.mtx-chart-tooltip-key {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mtx-chart-tooltip-swatch {
+  width: 10px;
+  height: 2px;
+  flex: none;
+}
+.mtx-chart-tooltip-value {
+  font-family: var(--mono);
+  font-weight: 700;
+  color: var(--text-h);
+  flex: none;
+}
+
+/* ---------- card chips (reuses the game's --tone-* bands) ---------- */
+
+.mtx-card-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 22px;
+  border-radius: 5px;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 6px;
+  background: var(--tone-bg, var(--border));
+  color: var(--tone-fg, var(--text-h));
+}
+
+@media (max-width: 900px) {
+  .mtx-rail {
+    display: none;
+  }
+}

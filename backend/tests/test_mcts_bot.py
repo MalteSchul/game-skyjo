@@ -1,10 +1,11 @@
 import numpy as np
 import pytest
 
-from skyjo.bots.mcts_bot import MctsBot
+from skyjo.bots.mcts_bot import CHECKPOINT_PATH_ENV_VAR, MctsBot, default_evaluator
 from skyjo.domain.engine import GameState, apply_action, new_match
 from skyjo.domain.engine import legal_actions as engine_legal_actions
 from skyjo.domain.observation import Turn
+from skyjo.rl.checkpoint import save_checkpoint
 from skyjo.rl.evaluator import make_network_evaluator
 from skyjo.rl.network import AlphaZeroNet
 
@@ -105,6 +106,42 @@ def test_works_end_to_end_with_a_real_untrained_network():
     action = bot.choose_action(turn)
 
     assert action in turn.legal_actions
+
+
+# --- default_evaluator() / checkpoint loading ---------------------------------
+
+
+def test_default_evaluator_loads_a_real_training_checkpoint(tmp_path, monkeypatch):
+    """Regression test: skyjo.rl.checkpoint.save_checkpoint (what
+    scripts/train_mcts.py actually writes to --checkpoint-dir) wraps the
+    net's state_dict inside a payload with optimizer/iteration/extra keys -
+    default_evaluator must unwrap that via load_checkpoint, not hand the
+    whole payload straight to net.load_state_dict."""
+    trained_net = AlphaZeroNet()
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    save_checkpoint(checkpoint_path, trained_net, None, iteration=1, total_train_steps=1)
+    monkeypatch.setenv(CHECKPOINT_PATH_ENV_VAR, str(checkpoint_path))
+    default_evaluator.cache_clear()
+
+    try:
+        evaluate = default_evaluator()
+        priors, value = evaluate(new_match(player_count=2, seed=1))
+    finally:
+        default_evaluator.cache_clear()
+
+    assert priors
+    assert value.shape == (2,)
+
+
+def test_default_evaluator_raises_for_a_bad_checkpoint_path(tmp_path, monkeypatch):
+    monkeypatch.setenv(CHECKPOINT_PATH_ENV_VAR, str(tmp_path / "does_not_exist.pt"))
+    default_evaluator.cache_clear()
+
+    try:
+        with pytest.raises(FileNotFoundError):
+            default_evaluator()
+    finally:
+        default_evaluator.cache_clear()
 
 
 # --- integration: many consecutive turns, alternating seats -------------------

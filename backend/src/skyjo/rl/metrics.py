@@ -42,6 +42,10 @@ class MetricsLogger:
     def tensorboard_available(self) -> bool:
         return self._writer is not None
 
+    @property
+    def log_dir(self) -> Path:
+        return self._log_dir
+
     def log(self, step: int, metrics: dict[str, float], *, prefix: str = "") -> None:
         if not metrics:
             raise ValueError("MetricsLogger.log: metrics must be non-empty")

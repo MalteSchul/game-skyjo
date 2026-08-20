@@ -71,6 +71,14 @@ class MCTSEdge:
     action: Action
     prior: float
     n_act: int
+    # `prior` as `_expand` first set it, before `_apply_root_noise` (root
+    # edges only) mixes in Dirichlet noise and overwrites `prior` in place -
+    # kept around purely so the raw evaluator output stays inspectable
+    # (e.g. via `tree_export`) after the mix. Equal to `prior` on every
+    # non-root edge, since noise is only ever applied at the root. Defaults
+    # to whatever `prior` was constructed with, for callers (tests, mostly)
+    # that never touch noise at all.
+    prior_before_noise: float | None = None
     visit_count: int = 0
     value_sum: np.ndarray = field(default_factory=lambda: np.zeros(0))
     child: MCTSNode | ChanceNode | None = None
@@ -78,6 +86,8 @@ class MCTSEdge:
     def __post_init__(self) -> None:
         if self.value_sum.shape != (self.n_act,):
             self.value_sum = np.zeros(self.n_act)
+        if self.prior_before_noise is None:
+            self.prior_before_noise = self.prior
 
     def mean_value(self) -> np.ndarray:
         if self.visit_count == 0:
@@ -113,6 +123,15 @@ class MCTSNode:
     is_terminal: bool
     expanded: bool = False
     edges: dict[Action, MCTSEdge] = field(default_factory=dict)
+    # The utility vector this node's own state was assigned when it was
+    # expanded: `evaluate(state)`'s value for a decision node, or
+    # `_terminal_utility` for a terminal one. Purely a record of that one
+    # evaluation - never read back during search (backprop already folded
+    # it into the *parent* edge's `value_sum` at expansion time, see
+    # `_expand_child`) - kept only so a caller (e.g. `tree_export`) can see
+    # what the network itself predicted for a position, not just the
+    # Monte-Carlo average visits produced afterwards. None until expanded.
+    value: np.ndarray | None = None
 
     @property
     def visit_count(self) -> int:
@@ -161,7 +180,8 @@ def _expand(node: MCTSNode, turn: Turn, priors: dict[Action, float]) -> None:
         collapsed[representative] = collapsed.get(representative, 0.0) + prior
 
     node.edges = {
-        action: MCTSEdge(action=action, prior=prior, n_act=node.n_act) for action, prior in collapsed.items()
+        action: MCTSEdge(action=action, prior=prior, n_act=node.n_act)
+        for action, prior in collapsed.items()
     }
     node.expanded = True
 
@@ -192,18 +212,24 @@ def _select_edge(node: MCTSNode, c_puct: float) -> MCTSEdge:
             best_score = score
             best_edge = edge
 
-    assert best_edge is not None, "_select_edge: node has no edges - should never be called on a leaf"
+    assert best_edge is not None, (
+        "_select_edge: node has no edges - should never be called on a leaf"
+    )
     return best_edge
 
 
-def _expand_child(state: GameState, evaluate: EvaluateFn, n_act: int) -> tuple[MCTSNode, np.ndarray]:
+def _expand_child(
+    state: GameState, evaluate: EvaluateFn, n_act: int
+) -> tuple[MCTSNode, np.ndarray]:
     terminal = _is_terminal(state)
     child = MCTSNode(state=state, n_act=n_act, is_terminal=terminal)
     if terminal:
-        return child, _terminal_utility(state.total_scores)
+        child.value = _terminal_utility(state.total_scores)
+        return child, child.value
 
     priors, value = evaluate(state)
     _expand(child, Turn.from_state(state), priors)
+    child.value = value
     return child, value
 
 
@@ -245,7 +271,9 @@ def _advance_round_closing(state: GameState, action: Action, rng: np.random.Gene
     return next_state
 
 
-def _simulate_once(root: MCTSNode, evaluate: EvaluateFn, c_puct: float, rng: np.random.Generator) -> None:
+def _simulate_once(
+    root: MCTSNode, evaluate: EvaluateFn, c_puct: float, rng: np.random.Generator
+) -> None:
     path: list[MCTSEdge | ChanceEdge] = []
     node = root
 
@@ -266,7 +294,9 @@ def _simulate_once(root: MCTSNode, evaluate: EvaluateFn, c_puct: float, rng: np.
         if is_reveal(state, edge.action):
             chance = edge.child
             if not isinstance(chance, ChanceNode):
-                chance = ChanceNode(n_act=node.n_act, counts=unknown_card_counts(Turn.from_state(state)))
+                chance = ChanceNode(
+                    n_act=node.n_act, counts=unknown_card_counts(Turn.from_state(state))
+                )
                 edge.child = chance
 
             sampled_value = sample_reveal(chance.counts, rng)
@@ -336,8 +366,9 @@ def run_mcts(
     root_state = gamestate_from_turn(root_turn)
     root = MCTSNode(state=root_state, n_act=n_act, is_terminal=False)
 
-    priors, _ = evaluate(root_state)
+    priors, value = evaluate(root_state)
     _expand(root, root_turn, priors)
+    root.value = value
     if add_root_noise:
         _apply_root_noise(root, dirichlet_alpha, dirichlet_epsilon, rng)
 
