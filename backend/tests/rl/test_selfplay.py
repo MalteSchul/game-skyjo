@@ -1,9 +1,11 @@
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
 from skyjo.bots.heuristic_bot import HeuristicBot
+from skyjo.domain.engine import ActionType, new_match
 from skyjo.domain.engine import legal_actions as engine_legal_actions
-from skyjo.domain.engine import new_match
 from skyjo.rl.action_space import ACTION_SPACE_SIZE, action_to_index
 from skyjo.rl.selfplay import generate_bot_episode, generate_episode, generate_episodes_batch
 
@@ -16,6 +18,23 @@ def _uniform_evaluate(state):
 
 def _batch_evaluate(states):
     return [_uniform_evaluate(s) for s in states]
+
+
+def _degenerate_place_zero_evaluate(state):
+    """Deterministically prefers DRAW_STOCK, then PLACE at position 0 - never
+    reveals anything past the initial two flips and position 0, so a round
+    genuinely never closes on its own (nothing else on the board ever
+    becomes face-up or clears). Real, reliable trap for exercising
+    round_max_steps/max_rounds, not a contrived assertion about internals.
+    """
+    actions = engine_legal_actions(state)
+    preferred = next((a for a in actions if a.type == ActionType.DRAW_STOCK), None)
+    if preferred is None:
+        preferred = next((a for a in actions if a.type == ActionType.PLACE and a.position == 0), None)
+    if preferred is None:
+        preferred = actions[0]
+    priors = {a: (1.0 if a == preferred else 0.0) for a in actions}
+    return priors, np.zeros(len(state.boards))
 
 
 # --- happy path ------------------------------------------------------------
@@ -76,6 +95,68 @@ def test_generate_episode_raises_if_the_match_does_not_finish_within_max_steps()
         generate_episode(state, _uniform_evaluate, num_simulations=1, rng=np.random.default_rng(0), max_steps=1)
 
 
+# --- generate_episode: round_max_steps / max_rounds -------------------------
+
+
+def test_generate_episode_force_closes_a_stuck_round_instead_of_raising():
+    state = new_match(player_count=2, seed=1)
+
+    samples = generate_episode(
+        state,
+        _degenerate_place_zero_evaluate,
+        num_simulations=2,
+        tau_schedule=0.0,
+        rng=np.random.default_rng(0),
+        max_steps=5000,
+        round_max_steps=20,
+        max_rounds=3,
+    )
+
+    assert len(samples) > 0
+    # a strict permutation for 2 players, same as a naturally-finished game -
+    # force-closing still produces a legitimate final outcome to label with.
+    assert sorted(samples[-1].y.tolist()) == [0, 1]
+
+
+def test_generate_episode_without_round_max_steps_hits_the_same_trap_generate_episode_force_close_solves():
+    # Confirms the degenerate evaluator is genuinely pathological (not just
+    # "the test didn't wait long enough") - with round-level forcing
+    # effectively disabled, this is exactly today's failure mode.
+    state = new_match(player_count=2, seed=1)
+
+    with pytest.raises(RuntimeError):
+        generate_episode(
+            state,
+            _degenerate_place_zero_evaluate,
+            num_simulations=2,
+            tau_schedule=0.0,
+            rng=np.random.default_rng(0),
+            max_steps=50,
+            round_max_steps=100_000,
+            max_rounds=100_000,
+        )
+
+
+def test_generate_episode_stops_after_max_rounds_even_short_of_target_score():
+    # target_score set unreachably high so max_rounds - not target_score - is
+    # what ends the game; round_max_steps is small so every round is forced.
+    state = replace(new_match(player_count=2, seed=1), target_score=1_000_000)
+
+    samples = generate_episode(
+        state,
+        _degenerate_place_zero_evaluate,
+        num_simulations=2,
+        tau_schedule=0.0,
+        rng=np.random.default_rng(0),
+        max_steps=5000,
+        round_max_steps=10,
+        max_rounds=4,
+    )
+
+    assert len(samples) > 0
+    assert sum(samples[-1].y.tolist()) == 1  # still a valid 2-player rank permutation
+
+
 # --- generate_episodes_batch ------------------------------------------------
 
 
@@ -128,6 +209,34 @@ def test_generate_episodes_batch_handles_games_finishing_at_different_times():
 
 def test_generate_episodes_batch_with_no_games_returns_an_empty_list():
     assert generate_episodes_batch([], _batch_evaluate, num_simulations=2) == []
+
+
+def test_generate_episodes_batch_force_closes_stuck_rounds_per_game_independently():
+    # Only the first game is stuck (degenerate evaluator); the second plays
+    # normally - both must finish, independently, without either raising.
+    def mixed_evaluate(states):
+        return [
+            _degenerate_place_zero_evaluate(s) if i == 0 else _uniform_evaluate(s) for i, s in enumerate(states)
+        ]
+
+    states = [new_match(player_count=2, seed=1), new_match(player_count=2, seed=2)]
+
+    results = generate_episodes_batch(
+        states,
+        mixed_evaluate,
+        num_simulations=2,
+        tau_schedule=0.0,
+        rngs=[np.random.default_rng(0), np.random.default_rng(1)],
+        max_steps=5000,
+        round_max_steps=20,
+        max_rounds=3,
+    )
+
+    assert len(results) == 2
+    assert len(results[0]) > 0
+    assert len(results[1]) > 0
+    assert sorted(results[0][-1].y.tolist()) == [0, 1]
+    assert sorted(results[1][-1].y.tolist()) == [0, 1]
 
 
 # --- generate_episodes_batch: bad path --------------------------------------

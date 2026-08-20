@@ -13,6 +13,7 @@ from skyjo.domain.engine import (
     IllegalActionError,
     PlayerBoard,
     apply_action,
+    force_close_round,
     legal_actions,
     new_match,
     start_next_round,
@@ -285,6 +286,45 @@ def test_round_that_pushes_a_player_over_target_score_ends_the_match():
     assert state.total_scores == (102, 67)
     with pytest.raises(IllegalActionError):
         start_next_round(state)
+
+
+def test_force_close_round_reveals_everything_and_scores_with_no_finisher_penalty():
+    # board0's sum (52) is not the sole lowest (board1 is lower at 47), which
+    # would double board0's score under a *natural* close if board0 were the
+    # finisher - force_close_round must not apply that penalty to anyone,
+    # since nobody actually finished.
+    board0 = _hide(_board_from_values([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, -1, -2]), 0, 5, 11)
+    board1 = _board_from_values([0, 1, 2, 3, 4, 4, 5, 6, 7, 8, 9, -2], face_up=True)
+    state = _state((board0, board1), current_player=0, phase="awaiting_draw")
+
+    closed = force_close_round(state)
+
+    assert all(c.face_up for c in closed.boards[0].cards if c is not None)
+    assert closed.round_scores == (52, 47)
+    assert closed.total_scores == (52, 47)  # no doubling, unlike _score_and_close_round
+    assert closed.finisher is None
+    assert closed.players_awaiting_final_turn == frozenset()
+    assert closed.phase == "round_over"
+
+
+def test_force_close_round_ends_the_match_if_it_crosses_target_score():
+    board0 = _board_from_values([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, -1, -2], face_up=True)
+    board1 = _board_from_values([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12], face_up=True)
+    state = _state((board0, board1), current_player=0, phase="awaiting_draw", total_scores=(50, 0), target_score=100)
+
+    closed = force_close_round(state)
+
+    assert closed.phase == "game_over"
+    assert closed.total_scores == (102, 67)
+
+
+@pytest.mark.parametrize("phase", ["round_over", "game_over"])
+def test_force_close_round_rejects_a_round_that_is_already_over(phase):
+    board = _board_from_values([0] * BOARD_SIZE, face_up=True)
+    state = _state((board, board), phase=phase)
+
+    with pytest.raises(IllegalActionError):
+        force_close_round(state)
 
 
 def test_start_next_round_carries_scores_forward_and_deals_fresh_hands():

@@ -318,6 +318,36 @@ def _score_and_close_round(state: GameState, finisher: int, awaiting: frozenset[
     )
 
 
+def force_close_round(state: GameState) -> GameState:
+    """Ends the current round immediately regardless of whether any player has
+    actually completed their board - reveals every remaining face-down card
+    and scores exactly as a natural close does, but with no finisher-doubling
+    penalty (that rule is about a player choosing to end the round; nobody
+    chose to end this one).
+
+    Not a real Skyjo rule - an escape hatch for a caller whose own per-round
+    step budget ran out (see rl.selfplay), so a stuck round produces a valid
+    scored outcome instead of the whole game erroring.
+    """
+    if state.phase in ("round_over", "game_over"):
+        raise IllegalActionError("force_close_round: round is already over")
+
+    boards = tuple(_reveal_all(board) for board in state.boards)
+    round_scores = tuple(sum(c.value for c in board.cards if c is not None) for board in boards)
+    total_scores = tuple(t + s for t, s in zip(state.total_scores, round_scores, strict=True))
+    phase: Phase = "game_over" if any(t >= state.target_score for t in total_scores) else "round_over"
+
+    return replace(
+        state,
+        boards=boards,
+        phase=phase,
+        finisher=None,
+        players_awaiting_final_turn=frozenset(),
+        round_scores=round_scores,
+        total_scores=total_scores,
+    )
+
+
 def _reveal_all(board: PlayerBoard) -> PlayerBoard:
     return replace(board, cards=tuple(c if c is None else replace(c, face_up=True) for c in board.cards))
 

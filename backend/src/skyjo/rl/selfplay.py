@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from skyjo.domain.engine import Action, GameState, apply_action, start_next_round
+from skyjo.domain.engine import Action, GameState, apply_action, force_close_round, start_next_round
 from skyjo.domain.observation import Turn
 from skyjo.rl.action_space import pi_to_vector
 from skyjo.rl.mcts import (
@@ -28,6 +28,17 @@ from skyjo.rl.mcts import (
 )
 
 DEFAULT_MAX_STEPS = 5000
+# A round that runs this long without closing naturally gets force-closed
+# (rl.domain.engine.force_close_round) instead of letting the whole game
+# error out - see that function's docstring for why a round can legitimately
+# never end on its own (an untrained/low-search policy has no pressure to
+# reveal new information, and Skyjo's rules don't require it to).
+DEFAULT_ROUND_MAX_STEPS = 200
+# After this many rounds close (naturally or forced) without reaching
+# target_score, the game just ends there on whatever total_scores currently
+# stand - a hard ceiling independent of score trends, on top of the softer
+# per-round budget above.
+DEFAULT_MAX_ROUNDS = 10
 
 
 @dataclass(frozen=True)
@@ -65,18 +76,30 @@ def generate_episode(
     dirichlet_epsilon: float = DEFAULT_DIRICHLET_EPSILON,
     rng: np.random.Generator | None = None,
     max_steps: int = DEFAULT_MAX_STEPS,
+    round_max_steps: int = DEFAULT_ROUND_MAX_STEPS,
+    max_rounds: int = DEFAULT_MAX_ROUNDS,
 ) -> list[ReplaySample]:
     rng = rng if rng is not None else np.random.default_rng()
     state = initial_state
     n_act = len(state.boards)
     pending: list[tuple[GameState, np.ndarray]] = []
+    round_step = 0
+    round_count = 0
 
     for step in range(max_steps):
         if state.phase == "round_over":
+            round_count += 1
+            if round_count >= max_rounds:
+                break
             state = start_next_round(state)
+            round_step = 0
             continue
         if state.phase == "game_over":
             break
+        if round_step >= round_max_steps:
+            state = force_close_round(state)
+            round_step = 0
+            continue
 
         tau = tau_schedule(step) if callable(tau_schedule) else tau_schedule
         root = run_mcts(
@@ -93,6 +116,7 @@ def generate_episode(
 
         action = sample_action(pi, rng)
         state = apply_action(state, action)
+        round_step += 1
     else:
         raise RuntimeError(f"generate_episode: match did not reach game_over within {max_steps} steps")
 
@@ -111,6 +135,8 @@ def generate_episodes_batch(
     dirichlet_epsilon: float = DEFAULT_DIRICHLET_EPSILON,
     rngs: Sequence[np.random.Generator] | None = None,
     max_steps: int = DEFAULT_MAX_STEPS,
+    round_max_steps: int = DEFAULT_ROUND_MAX_STEPS,
+    max_rounds: int = DEFAULT_MAX_ROUNDS,
 ) -> list[list[ReplaySample]]:
     """Batched sibling of `generate_episode`: plays `len(initial_states)`
     games to completion concurrently instead of one after another, using
@@ -124,10 +150,13 @@ def generate_episodes_batch(
 
     Returns one list of `ReplaySample`s per game, in `initial_states` order.
 
-    `max_steps` bounds the number of decision *rounds* (each round advances
-    every still-active game by exactly one decision), not raw loop iterations
-    the way `generate_episode`'s `max_steps` does - a `round_over` transition
-    is resolved before it can consume a round. Immaterial in practice given
+    Same `round_max_steps`/`max_rounds` safety valves as `generate_episode`,
+    tracked per game - a stuck round in one game force-closes independently
+    of the others (see `domain.engine.force_close_round`). `max_steps` bounds
+    the number of decision *rounds* (each round advances every still-active
+    game by exactly one decision), not raw loop iterations the way
+    `generate_episode`'s `max_steps` does - a `round_over` transition is
+    resolved before it can consume a round. Immaterial in practice given
     `DEFAULT_MAX_STEPS`'s size, but not byte-for-byte the same bound.
     """
     n = len(initial_states)
@@ -142,13 +171,35 @@ def generate_episodes_batch(
     pending: list[list[tuple[GameState, np.ndarray]]] = [[] for _ in range(n)]
     finished = [False] * n
     steps = [0] * n
+    round_steps = [0] * n
+    round_counts = [0] * n
 
     for _ in range(max_steps):
         for i in range(n):
-            while not finished[i] and states[i].phase == "round_over":
-                states[i] = start_next_round(states[i])
-            if not finished[i] and states[i].phase == "game_over":
-                finished[i] = True
+            if finished[i]:
+                continue
+            # Resolves every non-decision state (round_over, a round that's
+            # exceeded its own step budget) before this game can be added to
+            # this round's batch - force_close_round can itself produce a
+            # fresh round_over/game_over, so this must re-check, not just
+            # handle each case once.
+            while True:
+                if states[i].phase == "round_over":
+                    round_counts[i] += 1
+                    if round_counts[i] >= max_rounds:
+                        finished[i] = True
+                        break
+                    states[i] = start_next_round(states[i])
+                    round_steps[i] = 0
+                    continue
+                if states[i].phase == "game_over":
+                    finished[i] = True
+                    break
+                if round_steps[i] >= round_max_steps:
+                    states[i] = force_close_round(states[i])
+                    round_steps[i] = 0
+                    continue
+                break
 
         active = [i for i in range(n) if not finished[i]]
         if not active:
@@ -173,6 +224,7 @@ def generate_episodes_batch(
             action = sample_action(pi, rngs[i])
             states[i] = apply_action(states[i], action)
             steps[i] += 1
+            round_steps[i] += 1
     else:
         unfinished = sum(1 for f in finished if not f)
         raise RuntimeError(
