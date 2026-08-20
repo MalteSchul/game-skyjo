@@ -20,11 +20,29 @@ Watch live metrics while a run is in progress:
 
 Point a live mcts_bot at the result (see skyjo.bots.mcts_bot):
   SKYJO_MCTS_CHECKPOINT_PATH=scripts/output/checkpoints/run1/latest.pt uv run uvicorn skyjo.api:app
+
+Self-play throughput (--workers / --selfplay-batch-size):
+  Batching MCTS leaf evaluations (--selfplay-batch-size > 1) amortizes the
+  network's per-call dispatch overhead, which dominates self-play wall time at
+  batch=1 - see rl.mcts.run_mcts_batch. Both default to None here and are
+  resolved from the local machine (os.cpu_count()) and --games-per-iteration
+  if not passed explicitly, rather than a fixed number baked into the script -
+  the right (workers, batch_size) pair depends on your hardware and how many
+  games you self-play per iteration, and a batch size much bigger than
+  games_per_iteration/workers just leaves a worker idle. Prefer a few workers
+  with a large batch each over many workers with a small one (a small batch
+  loses more from being diluted than it gains from an extra process) - see
+  the benchmark in scripts/benchmark_selfplay_batching.py if you want to
+  profile your own hardware instead of trusting the default heuristic.
+  Caveat: a batch_size > 1 group currently fails as a whole if any one game
+  in it does (unlike the batch_size=1 path, which isolates failures per
+  game) - fine for a monitored run, worth knowing for a long unattended one.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 
 import torch
 
@@ -38,7 +56,7 @@ from skyjo.rl.selfplay import DEFAULT_MAX_STEPS
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--iterations", type=int, default=200)
-    parser.add_argument("--games-per-iteration", type=int, default=20)
+    parser.add_argument("--games-per-iteration", type=int, default=32)
     parser.add_argument("--num-simulations", type=int, default=200)
     parser.add_argument("--min-players", type=int, default=2)
     parser.add_argument("--max-players", type=int, default=2)
@@ -65,8 +83,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--workers",
         type=int,
-        default=0,
-        help="0 or 1 = self-play runs serially in-process; >1 spawns a process pool of this size",
+        default=None,
+        help="0 or 1 = self-play runs serially in-process; >1 spawns a process pool of this size. "
+        "Default (unset): max(1, os.cpu_count() // 2) - see the module docstring.",
+    )
+    parser.add_argument(
+        "--selfplay-batch-size",
+        type=int,
+        default=None,
+        help="1 (unbatched, today's per-game behavior) or >1 to batch that many games' MCTS leaf "
+        "evaluations together per network call - see rl.mcts.run_mcts_batch. Default (unset): "
+        "max(1, games_per_iteration // workers) once --workers is resolved, so it's never a "
+        "bigger batch than games_per_iteration/workers can actually fill. See the module "
+        "docstring for the resilience caveat.",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint-dir", default="scripts/output/checkpoints/default")
@@ -76,9 +105,26 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _resolve_selfplay_concurrency(args: argparse.Namespace) -> tuple[int, int]:
+    """Both --workers and --selfplay-batch-size default to None (not resolved
+    at argparse time) so the batch size can be derived from *this run's* own
+    --workers/--games-per-iteration rather than a number baked into the
+    script - see the module docstring's "Self-play throughput" section.
+    """
+    workers = args.workers if args.workers is not None else max(1, (os.cpu_count() or 4) // 2)
+    if args.selfplay_batch_size is not None:
+        selfplay_batch_size = args.selfplay_batch_size
+    else:
+        # workers=0/1 both mean "no process pool" (see --workers' help) - divide by the
+        # effective parallelism (>= 1), not the literal possibly-zero worker count.
+        selfplay_batch_size = max(1, args.games_per_iteration // max(workers, 1))
+    return workers, selfplay_batch_size
+
+
 def main() -> None:
     args = _parse_args()
     network_kwargs = {"trunk_dim": args.trunk_dim, "num_residual_blocks": args.residual_blocks}
+    workers, selfplay_batch_size = _resolve_selfplay_concurrency(args)
 
     config = TrainingConfig(
         iterations=args.iterations,
@@ -98,11 +144,13 @@ def main() -> None:
         lambda_rank=args.lambda_rank,
         l2_coef=args.l2_coef,
         network_kwargs=network_kwargs,
-        workers=args.workers,
+        workers=workers,
+        selfplay_batch_size=selfplay_batch_size,
         seed=args.seed,
         checkpoint_dir=args.checkpoint_dir,
         checkpoint_every=args.checkpoint_every,
     )
+    print(f"self-play concurrency: workers={workers} selfplay_batch_size={selfplay_batch_size}")
 
     net = AlphaZeroNet(**network_kwargs)
     optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
