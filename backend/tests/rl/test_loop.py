@@ -65,6 +65,7 @@ def test_training_config_accepts_valid_values():
         {"num_simulations": -1},
         {"batch_size": 0},
         {"workers": -1},
+        {"selfplay_batch_size": 0},
         {"checkpoint_every": 0},
     ],
 )
@@ -149,6 +150,65 @@ def test_run_training_loop_with_multiple_workers_produces_samples(tmp_path):
         _, final_state = run_training_loop(config, metrics)
 
     assert final_state.iteration == 1
+
+
+# --- run_training_loop: batched self-play -----------------------------------
+
+
+def test_run_training_loop_with_selfplay_batch_size_produces_samples_and_trains(tmp_path):
+    config = _tiny_config(games_per_iteration=4, selfplay_batch_size=2, iterations=1)
+
+    with MetricsLogger(tmp_path / "logs") as metrics:
+        _, final_state = run_training_loop(config, metrics)
+
+    assert final_state.iteration == 1
+    record = json.loads((tmp_path / "logs" / "metrics.jsonl").read_text().splitlines()[0])
+    assert record["self_play/failed_games"] == 0
+    assert record["self_play/samples_generated"] > 0
+
+
+def test_run_training_loop_with_selfplay_batch_size_and_multiple_workers(tmp_path):
+    # games_per_iteration=4, batch_size=2 -> 2 groups of 2, sharded across 2
+    # worker processes: batching and process-parallelism must compose.
+    config = _tiny_config(games_per_iteration=4, selfplay_batch_size=2, workers=2, iterations=1)
+
+    with MetricsLogger(tmp_path / "logs") as metrics:
+        _, final_state = run_training_loop(config, metrics)
+
+    assert final_state.iteration == 1
+
+
+def test_run_training_loop_with_selfplay_batch_size_one_matches_default_behavior(tmp_path):
+    # selfplay_batch_size=1 is the explicit form of the default - both should
+    # go through the exact same unbatched path (run_self_play_iteration), so
+    # this should behave identically to a config without the field set.
+    config = _tiny_config(games_per_iteration=2, selfplay_batch_size=1, iterations=1)
+
+    with MetricsLogger(tmp_path / "logs") as metrics:
+        _, final_state = run_training_loop(config, metrics)
+
+    assert final_state.iteration == 1
+
+
+def test_run_training_loop_batched_selfplay_survives_a_whole_group_failing(tmp_path, monkeypatch):
+    # generate_episodes_batch failing takes down its entire group (see
+    # _play_batch_of_games's docstring) - unlike the per-game path, so the
+    # failed-game count should reflect every seed in the failed group, not
+    # just one.
+    def always_fails(*args, **kwargs):
+        raise AssertionError("simulated hidden_info bookkeeping bug")
+
+    monkeypatch.setattr(loop_module, "generate_episodes_batch", always_fails)
+    config = _tiny_config(games_per_iteration=4, selfplay_batch_size=2, iterations=1)
+
+    with MetricsLogger(tmp_path / "logs") as metrics:
+        _, final_state = run_training_loop(config, metrics)
+
+    assert final_state.iteration == 1
+    assert final_state.total_train_steps == 0
+    record = json.loads((tmp_path / "logs" / "metrics.jsonl").read_text().splitlines()[0])
+    assert record["self_play/failed_games"] == 4
+    assert record["self_play/samples_generated"] == 0
 
 
 # --- self-play resilience: one bad game must not kill the run --------------

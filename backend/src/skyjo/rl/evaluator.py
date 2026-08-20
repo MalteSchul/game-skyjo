@@ -4,7 +4,7 @@ in, `(priors over legal actions, utility vector)` out.
 
 from __future__ import annotations
 
-from collections.abc import MutableMapping
+from collections.abc import MutableMapping, Sequence
 
 import numpy as np
 import torch
@@ -12,7 +12,7 @@ import torch
 from skyjo.domain.engine import Action, GameState
 from skyjo.rl.action_space import ACTION_SPACE_SIZE, index_to_action
 from skyjo.rl.encoding import encode_state
-from skyjo.rl.mcts import EvaluateFn
+from skyjo.rl.mcts import BatchEvaluateFn, EvaluateFn, LeafResult
 from skyjo.rl.network import AlphaZeroNet
 
 
@@ -59,3 +59,47 @@ def make_network_evaluator(
         return priors, value
 
     return evaluate
+
+
+def make_batch_network_evaluator(
+    net: AlphaZeroNet,
+    device: str | torch.device = "cpu",
+) -> BatchEvaluateFn:
+    """Batched sibling of `make_network_evaluator`: encodes every given state
+    and runs exactly one forward pass over all of them, regardless of how
+    many there are - a batch-of-N call is far cheaper per-state than N
+    batch-of-1 calls, which is the entire reason this exists (see
+    `rl.mcts.run_mcts_batch`, the intended caller). Returns results in the
+    same order as `states`; `states=[]` short-circuits without touching the
+    network at all.
+    """
+    net.to(device)
+    net.eval()
+
+    def evaluate_batch(states: Sequence[GameState]) -> list[LeafResult]:
+        if not states:
+            return []
+
+        encodings = [encode_state(state) for state in states]
+        with torch.no_grad():
+            features = torch.from_numpy(np.stack([e.features for e in encodings])).to(device)
+            mask = torch.from_numpy(np.stack([e.legal_action_mask for e in encodings])).to(device)
+            active_count = torch.tensor(
+                [e.active_count for e in encodings], dtype=torch.long, device=device
+            )
+            policy_probs, _rank_probs, utility = net(features, mask, active_count)
+
+        policy_probs = policy_probs.cpu().numpy()
+        utility = utility.cpu().numpy()
+
+        results: list[LeafResult] = []
+        for i, encoding in enumerate(encodings):
+            priors = {
+                index_to_action(j): float(policy_probs[i, j])
+                for j in range(ACTION_SPACE_SIZE)
+                if encoding.legal_action_mask[j]
+            }
+            results.append((priors, utility[i, : encoding.active_count]))
+        return results
+
+    return evaluate_batch

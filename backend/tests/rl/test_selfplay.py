@@ -5,13 +5,17 @@ from skyjo.bots.heuristic_bot import HeuristicBot
 from skyjo.domain.engine import legal_actions as engine_legal_actions
 from skyjo.domain.engine import new_match
 from skyjo.rl.action_space import ACTION_SPACE_SIZE, action_to_index
-from skyjo.rl.selfplay import generate_bot_episode, generate_episode
+from skyjo.rl.selfplay import generate_bot_episode, generate_episode, generate_episodes_batch
 
 
 def _uniform_evaluate(state):
     actions = engine_legal_actions(state)
     priors = {a: 1.0 / len(actions) for a in actions}
     return priors, np.zeros(len(state.boards))
+
+
+def _batch_evaluate(states):
+    return [_uniform_evaluate(s) for s in states]
 
 
 # --- happy path ------------------------------------------------------------
@@ -70,6 +74,77 @@ def test_generate_episode_raises_if_the_match_does_not_finish_within_max_steps()
 
     with pytest.raises(RuntimeError):
         generate_episode(state, _uniform_evaluate, num_simulations=1, rng=np.random.default_rng(0), max_steps=1)
+
+
+# --- generate_episodes_batch ------------------------------------------------
+
+
+def test_generate_episodes_batch_matches_generate_episode_played_one_at_a_time():
+    # Same property as run_mcts_batch's equivalence test, one level up: playing
+    # N games concurrently must produce exactly the samples/outcomes that
+    # playing each one alone (with the same seed) would - batching only
+    # changes when the evaluator is called, never the result.
+    state_a = new_match(player_count=2, seed=1)
+    state_b = new_match(player_count=3, seed=2)
+
+    solo_a = generate_episode(state_a, _uniform_evaluate, num_simulations=2, rng=np.random.default_rng(10), max_steps=3000)
+    solo_b = generate_episode(state_b, _uniform_evaluate, num_simulations=2, rng=np.random.default_rng(20), max_steps=3000)
+
+    batch_a, batch_b = generate_episodes_batch(
+        [state_a, state_b],
+        _batch_evaluate,
+        num_simulations=2,
+        rngs=[np.random.default_rng(10), np.random.default_rng(20)],
+        max_steps=3000,
+    )
+
+    assert [s.pi.tolist() for s in batch_a] == [s.pi.tolist() for s in solo_a]
+    assert [s.y.tolist() for s in batch_a] == [s.y.tolist() for s in solo_a]
+    assert [s.pi.tolist() for s in batch_b] == [s.pi.tolist() for s in solo_b]
+    assert [s.y.tolist() for s in batch_b] == [s.y.tolist() for s in solo_b]
+
+
+def test_generate_episodes_batch_handles_games_finishing_at_different_times():
+    # player counts differ (2 vs 4), so the games are very unlikely to reach
+    # game_over in the same number of decisions - this exercises the "batch
+    # shrinks as games finish early" path rather than every game ending on
+    # the same round.
+    states = [new_match(player_count=2, seed=1), new_match(player_count=4, seed=2)]
+
+    results = generate_episodes_batch(
+        states,
+        _batch_evaluate,
+        num_simulations=2,
+        rngs=[np.random.default_rng(0), np.random.default_rng(1)],
+        max_steps=3000,
+    )
+
+    assert len(results) == 2
+    assert len(results[0]) > 0
+    assert len(results[1]) > 0
+    assert sorted(results[0][-1].y.tolist()) == [0, 1]
+    assert sorted(results[1][-1].y.tolist()) == [0, 1, 2, 3]
+
+
+def test_generate_episodes_batch_with_no_games_returns_an_empty_list():
+    assert generate_episodes_batch([], _batch_evaluate, num_simulations=2) == []
+
+
+# --- generate_episodes_batch: bad path --------------------------------------
+
+
+def test_generate_episodes_batch_raises_if_a_game_does_not_finish_within_max_steps():
+    states = [new_match(player_count=2, seed=1)]
+
+    with pytest.raises(RuntimeError):
+        generate_episodes_batch(states, _batch_evaluate, num_simulations=1, rngs=[np.random.default_rng(0)], max_steps=1)
+
+
+def test_generate_episodes_batch_rejects_mismatched_rngs_length():
+    states = [new_match(player_count=2, seed=1), new_match(player_count=2, seed=2)]
+
+    with pytest.raises(ValueError):
+        generate_episodes_batch(states, _batch_evaluate, num_simulations=1, rngs=[np.random.default_rng(0)])
 
 
 # --- generate_bot_episode --------------------------------------------------

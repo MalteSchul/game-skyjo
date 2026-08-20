@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -59,7 +59,12 @@ from skyjo.rl.hidden_info import (
 
 # priors: prob per legal (post-collapsing) action, normalized over legal actions only.
 # value: utility vector of length n_act, aligned to player index.
-EvaluateFn = Callable[[GameState], "tuple[dict[Action, float], np.ndarray]"]
+LeafResult = tuple[dict[Action, float], np.ndarray]
+EvaluateFn = Callable[[GameState], LeafResult]
+# Same contract as EvaluateFn, but over many states at once (batch order in,
+# same order out) - one evaluator call instead of one per state. See
+# `run_mcts_batch`.
+BatchEvaluateFn = Callable[[Sequence[GameState]], "list[LeafResult]"]
 
 DEFAULT_C_PUCT = 1.5
 DEFAULT_DIRICHLET_ALPHA = 0.3
@@ -218,19 +223,48 @@ def _select_edge(node: MCTSNode, c_puct: float) -> MCTSEdge:
     return best_edge
 
 
-def _expand_child(
-    state: GameState, evaluate: EvaluateFn, n_act: int
-) -> tuple[MCTSNode, np.ndarray]:
-    terminal = _is_terminal(state)
-    child = MCTSNode(state=state, n_act=n_act, is_terminal=terminal)
-    if terminal:
+def _leaf_node(
+    state: GameState, n_act: int
+) -> Generator[GameState, LeafResult, tuple[MCTSNode, np.ndarray]]:
+    """Builds the `MCTSNode` for a freshly-reached leaf `state`.
+
+    A terminal state resolves immediately from the true final standings - no
+    evaluation needed, so this never yields for one. Otherwise it yields
+    `state` exactly once and expects the evaluator's `(priors, value)` result
+    sent back (via `.send`) to finish building the node. That single `yield`
+    is the seam that lets a caller batch this evaluation together with other
+    trees' pending leaves (`run_mcts_batch`) instead of every leaf calling an
+    evaluator on its own - see `_drive_gen` for the unbatched side of that
+    same seam.
+    """
+    if _is_terminal(state):
+        child = MCTSNode(state=state, n_act=n_act, is_terminal=True)
         child.value = _terminal_utility(state.total_scores)
         return child, child.value
 
-    priors, value = evaluate(state)
+    priors, value = yield state
+    child = MCTSNode(state=state, n_act=n_act, is_terminal=False)
     _expand(child, Turn.from_state(state), priors)
     child.value = value
     return child, value
+
+
+def _drive_gen(gen: Generator[GameState, LeafResult, None], evaluate: EvaluateFn) -> None:
+    """Eagerly resolves a `_simulate_once_gen` generator with a synchronous,
+    one-state-at-a-time `evaluate` call - this is what makes unbatched search
+    (`_simulate_once`) and batched search (`run_mcts_batch`) run the exact
+    same tree-walk code, just driven differently: one leaf at a time here,
+    many trees' leaves together there.
+    """
+    try:
+        leaf_state = next(gen)
+    except StopIteration:
+        return  # resolved without an evaluation (a cached-terminal leaf)
+    try:
+        gen.send(evaluate(leaf_state))
+    except StopIteration:
+        return
+    raise AssertionError("_drive_gen: generator yielded more than once")
 
 
 def _is_round_closing(state: GameState, action: Action) -> bool:
@@ -271,9 +305,17 @@ def _advance_round_closing(state: GameState, action: Action, rng: np.random.Gene
     return next_state
 
 
-def _simulate_once(
-    root: MCTSNode, evaluate: EvaluateFn, c_puct: float, rng: np.random.Generator
-) -> None:
+def _simulate_once_gen(
+    root: MCTSNode, c_puct: float, rng: np.random.Generator
+) -> Generator[GameState, LeafResult, None]:
+    """Generator form of one simulation: walks the tree exactly as before,
+    pausing at `yield` only where the walk reaches a leaf that genuinely
+    needs an evaluation (`_leaf_node` resolves a cached-terminal leaf without
+    yielding at all). `_simulate_once` (via `_drive_gen`) and `run_mcts_batch`
+    both drive this same walk - one leaf at a time, or many trees' leaves
+    batched together - so the tree-walk logic lives in exactly one place
+    regardless of which driver is used.
+    """
     path: list[MCTSEdge | ChanceEdge] = []
     node = root
 
@@ -288,7 +330,7 @@ def _simulate_once(
             # average over many independently sampled continuations rather
             # than one frozen future (see module docstring).
             child_state = _advance_round_closing(state, edge.action, rng)
-            child, value = _expand_child(child_state, evaluate, node.n_act)
+            _, value = yield from _leaf_node(child_state, node.n_act)
             break
 
         if is_reveal(state, edge.action):
@@ -313,7 +355,7 @@ def _simulate_once(
 
             if chance_edge.child is None:
                 child_state = _advance_resolved_reveal(state, edge.action, sampled_value)
-                child, value = _expand_child(child_state, evaluate, node.n_act)
+                child, value = yield from _leaf_node(child_state, node.n_act)
                 chance_edge.child = child
                 break
             if chance_edge.child.is_terminal:
@@ -325,7 +367,7 @@ def _simulate_once(
         # Deterministic: neither a reveal nor round-closing.
         if not isinstance(edge.child, MCTSNode):
             child_state = _advance_deterministic(state, edge.action)
-            child, value = _expand_child(child_state, evaluate, node.n_act)
+            child, value = yield from _leaf_node(child_state, node.n_act)
             edge.child = child
             break
         if edge.child.is_terminal:
@@ -336,6 +378,12 @@ def _simulate_once(
     for visited in path:
         visited.visit_count += 1
         visited.value_sum += value
+
+
+def _simulate_once(
+    root: MCTSNode, evaluate: EvaluateFn, c_puct: float, rng: np.random.Generator
+) -> None:
+    _drive_gen(_simulate_once_gen(root, c_puct, rng), evaluate)
 
 
 def run_mcts(
@@ -381,6 +429,76 @@ def run_mcts(
             on_simulation(i + 1)
 
     return root
+
+
+def run_mcts_batch(
+    root_turns: Sequence[Turn],
+    evaluate_batch: BatchEvaluateFn,
+    *,
+    num_simulations: int,
+    c_puct: float = DEFAULT_C_PUCT,
+    dirichlet_alpha: float = DEFAULT_DIRICHLET_ALPHA,
+    dirichlet_epsilon: float = DEFAULT_DIRICHLET_EPSILON,
+    add_root_noise: bool = True,
+    rngs: Sequence[np.random.Generator] | None = None,
+) -> list[MCTSNode]:
+    """Runs `len(root_turns)` independent searches side by side - one root
+    per turn - batching every round's leaf evaluations into a single
+    `evaluate_batch` call instead of evaluating each tree's leaf on its own.
+
+    The trees never interact: this produces exactly what running `run_mcts`
+    once per turn would (same tree-walk code, see `_simulate_once_gen`), just
+    with every round's `len(root_turns)` pending leaves - one per still-active
+    tree - handed to the evaluator together. It exists purely for network-call
+    throughput (batch-of-N is far cheaper per-state than N calls of batch-1),
+    not search quality or depth.
+
+    Every root advances by exactly `num_simulations` simulations. A root that
+    resolves a simulation without needing an evaluation (a cached-terminal
+    leaf, same as the unbatched path) simply contributes nothing to that
+    round's batch, which can shrink accordingly.
+    """
+    if num_simulations < 0:
+        raise ValueError("run_mcts_batch: num_simulations must be >= 0")
+    if not root_turns:
+        return []
+    rngs = list(rngs) if rngs is not None else [np.random.default_rng() for _ in root_turns]
+    if len(rngs) != len(root_turns):
+        raise ValueError("run_mcts_batch: rngs must be the same length as root_turns")
+
+    roots = [
+        MCTSNode(state=gamestate_from_turn(turn), n_act=len(turn.boards), is_terminal=False)
+        for turn in root_turns
+    ]
+    root_results = evaluate_batch([root.state for root in roots])
+    for root, turn, (priors, value), rng in zip(roots, root_turns, root_results, rngs, strict=True):
+        _expand(root, turn, priors)
+        root.value = value
+        if add_root_noise:
+            _apply_root_noise(root, dirichlet_alpha, dirichlet_epsilon, rng)
+
+    for _ in range(num_simulations):
+        gens = [_simulate_once_gen(root, c_puct, rng) for root, rng in zip(roots, rngs, strict=True)]
+        pending_indices: list[int] = []
+        pending_states: list[GameState] = []
+        for i, gen in enumerate(gens):
+            try:
+                pending_states.append(next(gen))
+                pending_indices.append(i)
+            except StopIteration:
+                pass  # resolved without an evaluation (a cached-terminal leaf)
+
+        if not pending_states:
+            continue
+        results = evaluate_batch(pending_states)
+        for i, result in zip(pending_indices, results, strict=True):
+            try:
+                gens[i].send(result)
+            except StopIteration:
+                continue
+            raise AssertionError("run_mcts_batch: a simulation yielded more than once")
+
+    return roots
 
 
 def visit_distribution(root: MCTSNode, tau: float = 1.0) -> dict[Action, float]:

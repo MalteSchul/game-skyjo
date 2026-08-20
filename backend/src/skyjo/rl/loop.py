@@ -34,17 +34,23 @@ import torch
 
 from skyjo.domain.engine import MAX_PLAYERS, MIN_PLAYERS, new_match
 from skyjo.rl.checkpoint import save_checkpoint
-from skyjo.rl.evaluator import make_network_evaluator
+from skyjo.rl.evaluator import make_batch_network_evaluator, make_network_evaluator
 from skyjo.rl.mcts import (
     DEFAULT_C_PUCT,
     DEFAULT_DIRICHLET_ALPHA,
     DEFAULT_DIRICHLET_EPSILON,
+    BatchEvaluateFn,
     EvaluateFn,
 )
 from skyjo.rl.metrics import MetricsLogger
 from skyjo.rl.network import AlphaZeroNet
 from skyjo.rl.replay_buffer import ReplayBuffer
-from skyjo.rl.selfplay import DEFAULT_MAX_STEPS, ReplaySample, generate_episode
+from skyjo.rl.selfplay import (
+    DEFAULT_MAX_STEPS,
+    ReplaySample,
+    generate_episode,
+    generate_episodes_batch,
+)
 from skyjo.rl.train import DEFAULT_L2_COEF, DEFAULT_LAMBDA_RANK, collate_batch, training_step
 
 
@@ -78,6 +84,14 @@ class TrainingConfig:
     network_kwargs: dict[str, Any] = field(default_factory=dict)
     max_steps_per_episode: int = DEFAULT_MAX_STEPS
     workers: int = 0
+    # 1 (default) = today's behavior: each job plays one game at a time,
+    # evaluating its MCTS leaves one state per network call. >1 groups
+    # `games_per_iteration` into jobs of this many games each, played
+    # concurrently via `generate_episodes_batch` so every decision round's
+    # leaf evaluations across the whole group become one batched network
+    # call instead of one call per state - see `rl.mcts.run_mcts_batch`.
+    # `workers` still shards jobs (now groups) across processes the same way.
+    selfplay_batch_size: int = 1
     seed: int = 0
     checkpoint_dir: str | None = None
     checkpoint_every: int = 1
@@ -104,6 +118,8 @@ class TrainingConfig:
             raise ValueError("TrainingConfig: max_steps_per_episode must be > 0")
         if self.workers < 0:
             raise ValueError("TrainingConfig: workers must be >= 0")
+        if self.selfplay_batch_size < 1:
+            raise ValueError("TrainingConfig: selfplay_batch_size must be >= 1")
         if self.checkpoint_every <= 0:
             raise ValueError("TrainingConfig: checkpoint_every must be > 0")
 
@@ -147,13 +163,17 @@ class _SelfPlayJob:
 # Set by `_init_worker`, either in a subprocess (parallel self-play) or
 # in-process (serial self-play, `config.workers <= 1`) - see module docstring.
 _worker_evaluate: EvaluateFn | None = None
+_worker_evaluate_batch: BatchEvaluateFn | None = None
 
 
 def _init_worker(state_dict: dict[str, torch.Tensor], network_kwargs: dict[str, Any]) -> None:
-    global _worker_evaluate
+    global _worker_evaluate, _worker_evaluate_batch
     net = AlphaZeroNet(**network_kwargs)
     net.load_state_dict(state_dict)
+    # Building both is cheap (they just close over the same net) and keeps
+    # worker init identical regardless of which self-play path is used.
     _worker_evaluate = make_network_evaluator(net)
+    _worker_evaluate_batch = make_batch_network_evaluator(net)
 
 
 def _log_failure(job: _SelfPlayJob, exc: Exception) -> None:
@@ -217,6 +237,120 @@ def _play_one_game(job: _SelfPlayJob) -> list[ReplaySample]:
     except Exception as exc:  # noqa: BLE001 - deliberately blind, see docstring above
         _log_failure(job, exc)
         return []
+
+
+@dataclass(frozen=True)
+class _SelfPlayBatchJob:
+    seeds: tuple[int, ...]
+    player_counts: tuple[int, ...]
+    num_simulations: int
+    tau_moves: int
+    tau_high: float
+    tau_low: float
+    c_puct: float
+    dirichlet_alpha: float
+    dirichlet_epsilon: float
+    max_steps: int
+    failure_log_path: str
+
+
+def _log_batch_failure(job: _SelfPlayBatchJob, exc: Exception) -> None:
+    summary = f"_play_batch_of_games: seeds={list(job.seeds)} failed, skipping the whole group: {exc}"
+    print(summary)
+    with open(job.failure_log_path, "a", encoding="utf-8") as f:
+        f.write(f"--- {datetime.now(UTC).isoformat()} {summary}\n")
+        f.write(traceback.format_exc())
+        f.write("\n")
+
+
+def _play_batch_of_games(job: _SelfPlayBatchJob) -> list[ReplaySample]:
+    """Plays `len(job.seeds)` games concurrently via `generate_episodes_batch`,
+    batching every decision round's MCTS leaf evaluations across the whole
+    group into one network call (see `rl.mcts.run_mcts_batch`).
+
+    Unlike `_play_one_game`, a failure here takes down the *entire* group,
+    not just one game - `generate_episodes_batch` doesn't isolate its games
+    from each other's exceptions the way per-game `_play_one_game` does.
+    Acceptable for measuring throughput; would need per-game isolation before
+    this path is trusted for a long, unattended production run.
+    """
+    if _worker_evaluate_batch is None:
+        raise RuntimeError("_play_batch_of_games: worker was not initialized via _init_worker")
+    initial_states = [
+        new_match(player_count=player_count, seed=seed)
+        for seed, player_count in zip(job.seeds, job.player_counts, strict=True)
+    ]
+    rngs = [np.random.default_rng(seed) for seed in job.seeds]
+    tau_schedule = make_tau_schedule(job.tau_moves, job.tau_high, job.tau_low)
+    try:
+        results = generate_episodes_batch(
+            initial_states,
+            _worker_evaluate_batch,
+            num_simulations=job.num_simulations,
+            tau_schedule=tau_schedule,
+            c_puct=job.c_puct,
+            dirichlet_alpha=job.dirichlet_alpha,
+            dirichlet_epsilon=job.dirichlet_epsilon,
+            rngs=rngs,
+            max_steps=job.max_steps,
+        )
+    except Exception as exc:  # noqa: BLE001 - deliberately blind, see docstring above
+        _log_batch_failure(job, exc)
+        return []
+    return [sample for game_samples in results for sample in game_samples]
+
+
+def _build_batch_jobs(
+    config: TrainingConfig, rng: np.random.Generator, failure_log_path: str
+) -> list[_SelfPlayBatchJob]:
+    player_counts = rng.integers(config.min_players, config.max_players + 1, size=config.games_per_iteration)
+    seeds = rng.integers(0, 2**31 - 1, size=config.games_per_iteration)
+    batch_size = config.selfplay_batch_size
+    return [
+        _SelfPlayBatchJob(
+            seeds=tuple(int(s) for s in seeds[start : start + batch_size]),
+            player_counts=tuple(int(p) for p in player_counts[start : start + batch_size]),
+            num_simulations=config.num_simulations,
+            tau_moves=config.tau_moves,
+            tau_high=config.tau_high,
+            tau_low=config.tau_low,
+            c_puct=config.c_puct,
+            dirichlet_alpha=config.dirichlet_alpha,
+            dirichlet_epsilon=config.dirichlet_epsilon,
+            max_steps=config.max_steps_per_episode,
+            failure_log_path=failure_log_path,
+        )
+        for start in range(0, config.games_per_iteration, batch_size)
+    ]
+
+
+def run_self_play_iteration_batched(
+    net: AlphaZeroNet, config: TrainingConfig, jobs: list[_SelfPlayBatchJob]
+) -> tuple[list[ReplaySample], int]:
+    """Batched sibling of `run_self_play_iteration`: each job plays a whole
+    group of games concurrently (`_play_batch_of_games`) instead of one game
+    at a time. `workers` still shards jobs (now groups, not single games)
+    across processes exactly as before.
+    """
+    state_dict = {k: v.detach().cpu() for k, v in net.state_dict().items()}
+
+    if config.workers <= 1:
+        _init_worker(state_dict, config.network_kwargs)
+        group_results = [_play_batch_of_games(job) for job in jobs]
+    else:
+        with ProcessPoolExecutor(
+            max_workers=config.workers, initializer=_init_worker, initargs=(state_dict, config.network_kwargs)
+        ) as pool:
+            group_results = list(pool.map(_play_batch_of_games, jobs))
+
+    samples: list[ReplaySample] = []
+    failed_games = 0
+    for job, group_samples in zip(jobs, group_results, strict=True):
+        if group_samples:
+            samples.extend(group_samples)
+        else:
+            failed_games += len(job.seeds)
+    return samples, failed_games
 
 
 def _build_jobs(config: TrainingConfig, rng: np.random.Generator, failure_log_path: str) -> list[_SelfPlayJob]:
@@ -292,8 +426,12 @@ def run_training_loop(
         step = state.iteration
 
         self_play_start = time.monotonic()
-        jobs = _build_jobs(config, rng, failure_log_path)
-        samples, failed_games = run_self_play_iteration(net, config, jobs)
+        if config.selfplay_batch_size <= 1:
+            jobs = _build_jobs(config, rng, failure_log_path)
+            samples, failed_games = run_self_play_iteration(net, config, jobs)
+        else:
+            batch_jobs = _build_batch_jobs(config, rng, failure_log_path)
+            samples, failed_games = run_self_play_iteration_batched(net, config, batch_jobs)
         for sample in samples:
             buffer.add(sample)
         successful_games = max(config.games_per_iteration - failed_games, 1)

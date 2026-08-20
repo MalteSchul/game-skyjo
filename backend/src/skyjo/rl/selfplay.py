@@ -19,8 +19,10 @@ from skyjo.rl.mcts import (
     DEFAULT_C_PUCT,
     DEFAULT_DIRICHLET_ALPHA,
     DEFAULT_DIRICHLET_EPSILON,
+    BatchEvaluateFn,
     EvaluateFn,
     run_mcts,
+    run_mcts_batch,
     sample_action,
     visit_distribution,
 )
@@ -96,6 +98,93 @@ def generate_episode(
 
     y = np.asarray(final_ranks(state.total_scores), dtype=np.int64)
     return [ReplaySample(state=s, n_act=n_act, pi=pi_vector, y=y) for s, pi_vector in pending]
+
+
+def generate_episodes_batch(
+    initial_states: Sequence[GameState],
+    evaluate_batch: BatchEvaluateFn,
+    *,
+    num_simulations: int,
+    tau_schedule: Callable[[int], float] | float = 1.0,
+    c_puct: float = DEFAULT_C_PUCT,
+    dirichlet_alpha: float = DEFAULT_DIRICHLET_ALPHA,
+    dirichlet_epsilon: float = DEFAULT_DIRICHLET_EPSILON,
+    rngs: Sequence[np.random.Generator] | None = None,
+    max_steps: int = DEFAULT_MAX_STEPS,
+) -> list[list[ReplaySample]]:
+    """Batched sibling of `generate_episode`: plays `len(initial_states)`
+    games to completion concurrently instead of one after another, using
+    `run_mcts_batch` for every decision round so every still-in-progress
+    game's leaf evaluations get batched into one evaluator call - see
+    `rl.mcts.run_mcts_batch`'s docstring for why. Each game's own play is
+    otherwise identical to `generate_episode`: same tau schedule, same
+    action-sampling, same replay-sample recording, and finished games simply
+    stop contributing to later rounds' batches (no refill - a game that ends
+    early just shrinks the batch for the remaining games' rounds).
+
+    Returns one list of `ReplaySample`s per game, in `initial_states` order.
+
+    `max_steps` bounds the number of decision *rounds* (each round advances
+    every still-active game by exactly one decision), not raw loop iterations
+    the way `generate_episode`'s `max_steps` does - a `round_over` transition
+    is resolved before it can consume a round. Immaterial in practice given
+    `DEFAULT_MAX_STEPS`'s size, but not byte-for-byte the same bound.
+    """
+    n = len(initial_states)
+    if n == 0:
+        return []
+    rngs = list(rngs) if rngs is not None else [np.random.default_rng() for _ in range(n)]
+    if len(rngs) != n:
+        raise ValueError("generate_episodes_batch: rngs must be the same length as initial_states")
+
+    states = list(initial_states)
+    n_acts = [len(s.boards) for s in states]
+    pending: list[list[tuple[GameState, np.ndarray]]] = [[] for _ in range(n)]
+    finished = [False] * n
+    steps = [0] * n
+
+    for _ in range(max_steps):
+        for i in range(n):
+            while not finished[i] and states[i].phase == "round_over":
+                states[i] = start_next_round(states[i])
+            if not finished[i] and states[i].phase == "game_over":
+                finished[i] = True
+
+        active = [i for i in range(n) if not finished[i]]
+        if not active:
+            break
+
+        turns = [Turn.from_state(states[i]) for i in active]
+        taus = [tau_schedule(steps[i]) if callable(tau_schedule) else tau_schedule for i in active]
+
+        roots = run_mcts_batch(
+            turns,
+            evaluate_batch,
+            num_simulations=num_simulations,
+            c_puct=c_puct,
+            dirichlet_alpha=dirichlet_alpha,
+            dirichlet_epsilon=dirichlet_epsilon,
+            rngs=[rngs[i] for i in active],
+        )
+
+        for slot, i in enumerate(active):
+            pi = visit_distribution(roots[slot], tau=taus[slot])
+            pending[i].append((states[i], pi_to_vector(pi)))
+            action = sample_action(pi, rngs[i])
+            states[i] = apply_action(states[i], action)
+            steps[i] += 1
+    else:
+        unfinished = sum(1 for f in finished if not f)
+        raise RuntimeError(
+            f"generate_episodes_batch: {unfinished} of {n} games did not reach game_over "
+            f"within {max_steps} decision rounds"
+        )
+
+    results = []
+    for i in range(n):
+        y = np.asarray(final_ranks(states[i].total_scores), dtype=np.int64)
+        results.append([ReplaySample(state=s, n_act=n_acts[i], pi=pi_vector, y=y) for s, pi_vector in pending[i]])
+    return results
 
 
 def generate_bot_episode(

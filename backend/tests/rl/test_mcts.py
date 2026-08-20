@@ -22,6 +22,7 @@ from skyjo.rl.mcts import (
     _select_edge,
     _terminal_utility,
     run_mcts,
+    run_mcts_batch,
     sample_action,
     visit_distribution,
 )
@@ -402,3 +403,106 @@ def test_search_through_a_round_closing_edge_backs_up_bounded_utility():
         assert np.all(np.isfinite(edge.mean_value()))
         assert np.all(edge.mean_value() >= -1.0 - 1e-6)
         assert np.all(edge.mean_value() <= 1.0 + 1e-6)
+
+
+# --- run_mcts_batch --------------------------------------------------------
+
+
+def _batch_evaluate(states):
+    return [_uniform_evaluate(s) for s in states]
+
+
+def test_run_mcts_batch_matches_running_run_mcts_once_per_tree():
+    # Batching only changes *when* the evaluator is called, never what it's
+    # called with or what comes back - so a tree searched inside a batch of
+    # several must land on exactly the same edges/visit-counts as the same
+    # (turn, rng-seed) pair searched alone via run_mcts.
+    state_a = new_match(player_count=2, seed=1)
+    state_b = new_match(player_count=3, seed=2)
+    turn_a, turn_b = Turn.from_state(state_a), Turn.from_state(state_b)
+
+    root_a = run_mcts(turn_a, _uniform_evaluate, num_simulations=30, rng=np.random.default_rng(10), add_root_noise=False)
+    root_b = run_mcts(turn_b, _uniform_evaluate, num_simulations=30, rng=np.random.default_rng(20), add_root_noise=False)
+
+    batched_a, batched_b = run_mcts_batch(
+        [turn_a, turn_b],
+        _batch_evaluate,
+        num_simulations=30,
+        rngs=[np.random.default_rng(10), np.random.default_rng(20)],
+        add_root_noise=False,
+    )
+
+    assert batched_a.visit_count == root_a.visit_count == 30
+    assert batched_b.visit_count == root_b.visit_count == 30
+    assert {a: e.visit_count for a, e in batched_a.edges.items()} == {
+        a: e.visit_count for a, e in root_a.edges.items()
+    }
+    assert {a: e.visit_count for a, e in batched_b.edges.items()} == {
+        a: e.visit_count for a, e in root_b.edges.items()
+    }
+    for action, edge in batched_a.edges.items():
+        assert np.allclose(edge.mean_value(), root_a.edges[action].mean_value())
+
+
+def test_run_mcts_batch_handles_a_mix_of_cached_terminal_and_live_leaves():
+    # _near_closing_state's board is one PLACE away from ending the game
+    # outright (see test_advance_round_closing_never_leaks_the_hidden_sentinel...
+    # above) - pairing it with a fresh match means, within the same batch,
+    # some rounds' pending leaves resolve without any evaluation (cached
+    # terminal) while others still need one, exercising run_mcts_batch's
+    # per-round "batch can shrink" path.
+    closing_state = _near_closing_state(target_score=50)
+    fresh_state = new_match(player_count=2, seed=5)
+    turns = [Turn.from_state(closing_state), Turn.from_state(fresh_state)]
+
+    roots = run_mcts_batch(
+        turns,
+        _batch_evaluate,
+        num_simulations=20,
+        rngs=[np.random.default_rng(1), np.random.default_rng(2)],
+        add_root_noise=False,
+    )
+
+    assert len(roots) == 2
+    for root in roots:
+        assert root.visit_count == 20
+        for edge in root.edges.values():
+            assert np.all(np.isfinite(edge.mean_value()))
+
+
+def test_run_mcts_batch_with_zero_simulations_still_expands_every_root():
+    state = new_match(player_count=2, seed=1)
+    turn = Turn.from_state(state)
+
+    roots = run_mcts_batch(
+        [turn, turn], _batch_evaluate, num_simulations=0, rngs=[np.random.default_rng(0), np.random.default_rng(1)]
+    )
+
+    assert len(roots) == 2
+    for root in roots:
+        assert root.visit_count == 0
+        assert root.expanded
+        assert len(root.edges) > 0
+
+
+def test_run_mcts_batch_with_no_root_turns_returns_an_empty_list():
+    assert run_mcts_batch([], _batch_evaluate, num_simulations=10) == []
+
+
+# --- run_mcts_batch: bad path ----------------------------------------------
+
+
+def test_run_mcts_batch_rejects_negative_num_simulations():
+    state = new_match(player_count=2, seed=1)
+    turn = Turn.from_state(state)
+
+    with pytest.raises(ValueError):
+        run_mcts_batch([turn], _batch_evaluate, num_simulations=-1)
+
+
+def test_run_mcts_batch_rejects_mismatched_rngs_length():
+    state = new_match(player_count=2, seed=1)
+    turn = Turn.from_state(state)
+
+    with pytest.raises(ValueError):
+        run_mcts_batch([turn, turn], _batch_evaluate, num_simulations=5, rngs=[np.random.default_rng(0)])

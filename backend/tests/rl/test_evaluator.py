@@ -3,7 +3,7 @@ import pytest
 
 from skyjo.domain.engine import GameState, legal_actions, new_match
 from skyjo.rl.encoding import N_MAX_PLAYERS
-from skyjo.rl.evaluator import make_network_evaluator
+from skyjo.rl.evaluator import make_batch_network_evaluator, make_network_evaluator
 from skyjo.rl.network import AlphaZeroNet
 
 # --- fixture helpers -----------------------------------------------------------
@@ -86,7 +86,66 @@ def test_rank_probs_sink_only_holds_the_active_n_by_n_slice():
     assert sink[state].shape == (2, 2)
 
 
+# --- make_batch_network_evaluator ------------------------------------------
+
+
+def test_batch_evaluator_matches_single_evaluator_state_by_state():
+    # A batched forward pass must produce, per row, exactly what evaluating
+    # that same state alone would - no cross-row mixing anywhere in
+    # AlphaZeroNet (LayerNorm/softmax/einsum are all per-row), so batching
+    # states together should never change any individual state's result.
+    net = _tiny_net()
+    state_a = new_match(player_count=2, seed=1)
+    state_b = new_match(player_count=4, seed=2)
+    single_evaluate = make_network_evaluator(net)
+    batch_evaluate = make_batch_network_evaluator(net)
+
+    priors_a, value_a = single_evaluate(state_a)
+    priors_b, value_b = single_evaluate(state_b)
+    [(batch_priors_a, batch_value_a), (batch_priors_b, batch_value_b)] = batch_evaluate([state_a, state_b])
+
+    assert batch_priors_a.keys() == priors_a.keys()
+    for action in priors_a:
+        assert batch_priors_a[action] == pytest.approx(priors_a[action], abs=1e-5)
+    np.testing.assert_allclose(batch_value_a, value_a, atol=1e-5)
+
+    assert batch_priors_b.keys() == priors_b.keys()
+    for action in priors_b:
+        assert batch_priors_b[action] == pytest.approx(priors_b[action], abs=1e-5)
+    np.testing.assert_allclose(batch_value_b, value_b, atol=1e-5)
+
+
+def test_batch_evaluator_returns_results_in_the_same_order_as_states():
+    net = _tiny_net()
+    states = [new_match(player_count=2, seed=i) for i in range(5)]
+    batch_evaluate = make_batch_network_evaluator(net)
+    single_evaluate = make_network_evaluator(net)
+
+    results = batch_evaluate(states)
+
+    for state, (priors, value) in zip(states, results, strict=True):
+        expected_priors, expected_value = single_evaluate(state)
+        assert priors.keys() == expected_priors.keys()
+        np.testing.assert_allclose(value, expected_value, atol=1e-5)
+
+
+def test_batch_evaluator_returns_priors_over_legal_actions_and_a_per_player_value():
+    state = new_match(player_count=3, seed=1)
+    batch_evaluate = make_batch_network_evaluator(_tiny_net())
+
+    [(priors, value)] = batch_evaluate([state])
+
+    assert set(priors.keys()) == set(legal_actions(state))
+    assert value.shape == (3,)
+
+
 # --- bad/edge path ---------------------------------------------------------------
+
+
+def test_batch_evaluator_with_no_states_returns_an_empty_list_without_touching_the_network():
+    batch_evaluate = make_batch_network_evaluator(_tiny_net())
+
+    assert batch_evaluate([]) == []
 
 
 def test_two_different_states_get_two_separate_sink_entries():
