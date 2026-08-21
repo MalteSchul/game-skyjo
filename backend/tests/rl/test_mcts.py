@@ -21,6 +21,7 @@ from skyjo.rl.mcts import (
     MCTSNode,
     _select_edge,
     _terminal_utility,
+    greedy_action,
     run_mcts,
     run_mcts_batch,
     sample_action,
@@ -506,3 +507,35 @@ def test_run_mcts_batch_rejects_mismatched_rngs_length():
 
     with pytest.raises(ValueError):
         run_mcts_batch([turn, turn], _batch_evaluate, num_simulations=5, rngs=[np.random.default_rng(0)])
+
+
+# --- greedy_action -----------------------------------------------------------
+
+
+def test_greedy_action_returns_the_single_most_visited_action():
+    action_low = Action(type=ActionType.DRAW_STOCK)
+    action_high = Action(type=ActionType.DRAW_DISCARD)
+    root = MCTSNode(state=new_match(player_count=2, seed=1), n_act=2, is_terminal=False)
+    root.edges[action_low] = MCTSEdge(action=action_low, prior=0.5, n_act=2, visit_count=1)
+    root.edges[action_high] = MCTSEdge(action=action_high, prior=0.5, n_act=2, visit_count=5)
+
+    assert greedy_action(root, np.random.default_rng(0)) == action_high
+
+
+def test_greedy_action_breaks_ties_randomly_among_the_max_visited_actions():
+    action_a = Action(type=ActionType.DRAW_STOCK)
+    action_b = Action(type=ActionType.DRAW_DISCARD)
+    root = MCTSNode(state=new_match(player_count=2, seed=1), n_act=2, is_terminal=False)
+    root.edges[action_a] = MCTSEdge(action=action_a, prior=0.5, n_act=2, visit_count=3)
+    root.edges[action_b] = MCTSEdge(action=action_b, prior=0.5, n_act=2, visit_count=3)
+
+    chosen = {greedy_action(root, np.random.default_rng(seed)) for seed in range(20)}
+
+    assert chosen == {action_a, action_b}
+
+
+def test_greedy_action_raises_on_a_root_with_no_edges():
+    root = MCTSNode(state=new_match(player_count=2, seed=1), n_act=2, is_terminal=False)
+
+    with pytest.raises(ValueError):
+        greedy_action(root, np.random.default_rng(0))

@@ -29,7 +29,7 @@ from skyjo.domain.engine import Action
 from skyjo.domain.observation import Turn
 from skyjo.rl.checkpoint import load_checkpoint
 from skyjo.rl.evaluator import make_network_evaluator
-from skyjo.rl.mcts import DEFAULT_C_PUCT, EvaluateFn, run_mcts
+from skyjo.rl.mcts import DEFAULT_C_PUCT, EvaluateFn, greedy_action, run_mcts
 from skyjo.rl.network import AlphaZeroNet
 
 # If set, default_evaluator() loads this checkpoint (the format
@@ -97,17 +97,9 @@ class MctsBot:
             rng=self._rng,
             on_simulation=on_simulation if self._num_simulations > 0 else None,
         )
-        # Most-visited (strongest) action, not a tau-sampled one - but ties
-        # (common with an uninformative/untrained evaluator, e.g. every edge
-        # visited once) are broken randomly rather than always taking the
-        # same "first" edge: a deterministic tie-break can lock two such
-        # bots into repeating the same tied pair of actions forever (e.g.
-        # draw-then-discard, never placing) since nothing about the state
-        # that matters to the tie ever changes turn to turn.
-        visits = {action: edge.visit_count for action, edge in root.edges.items()}
-        max_visits = max(visits.values())
-        best_actions = [action for action, count in visits.items() if count == max_visits]
-        best_action = best_actions[0] if len(best_actions) == 1 else best_actions[self._rng.integers(len(best_actions))]
+        # Most-visited (strongest) action, not a tau-sampled one - see
+        # `greedy_action`'s docstring for why ties are broken randomly.
+        best_action = greedy_action(root, self._rng)
 
         if report_progress is not None and self._num_simulations == 0:
             report_progress(1.0)

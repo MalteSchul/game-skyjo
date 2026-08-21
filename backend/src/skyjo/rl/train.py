@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from skyjo.rl.encoding import N_MAX_PLAYERS, encode_state
+from skyjo.rl.encoding import N_MAX_PLAYERS, StateEncoding, encode_state
 from skyjo.rl.network import AlphaZeroNet
 from skyjo.rl.selfplay import ReplaySample
 
@@ -34,11 +34,28 @@ class TrainingBatch:
     y: torch.Tensor  # (B, N_MAX_PLAYERS) long, padding beyond n_act is masked out, not read
 
 
-def collate_batch(samples: Sequence[ReplaySample], device: str | torch.device = "cpu") -> TrainingBatch:
+def collate_batch(
+    samples: Sequence[ReplaySample],
+    device: str | torch.device = "cpu",
+    *,
+    encodings: Sequence[StateEncoding] | None = None,
+) -> TrainingBatch:
+    """`encodings`, if given, must be each sample's own `StateEncoding` in the
+    same order (e.g. from `ReplayBuffer.sample_batch_with_encodings`) - skips
+    re-running `encode_state` here for samples already encoded once when they
+    were added to the buffer. Recomputed from `s.state` when omitted, so any
+    caller with only raw `ReplaySample`s (a freshly loaded bootstrap dataset,
+    the existing tests) keeps working unchanged.
+    """
     if not samples:
         raise ValueError("collate_batch: samples must be non-empty")
+    if encodings is None:
+        encodings = [encode_state(s.state) for s in samples]
+    elif len(encodings) != len(samples):
+        raise ValueError(
+            f"collate_batch: got {len(encodings)} encodings for {len(samples)} samples"
+        )
 
-    encodings = [encode_state(s.state) for s in samples]
     features = torch.from_numpy(np.stack([e.features for e in encodings])).to(device)
     legal_action_mask = torch.from_numpy(np.stack([e.legal_action_mask for e in encodings])).to(device)
     active_count = torch.tensor([s.n_act for s in samples], dtype=torch.long, device=device)

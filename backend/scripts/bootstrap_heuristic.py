@@ -13,11 +13,24 @@ real self-play, without first having to tune MCTS-specific knobs
 Usage:
   uv run python scripts/bootstrap_heuristic.py --games 1000 --workers 6 \
       --train-steps 3000 --checkpoint-out scripts/output/checkpoints/bootstrap/latest.pt \
-      --log-dir scripts/output/runs/bootstrap
+      --log-dir scripts/output/runs/bootstrap --samples-out scripts/output/datasets/bootstrap.pkl
 
 Then hand off to real MCTS self-play:
   uv run python scripts/train_mcts.py --resume scripts/output/checkpoints/bootstrap/latest.pt \
       --checkpoint-dir scripts/output/checkpoints/run1 --log-dir scripts/output/runs/run1 [...]
+
+Re-training on a previously generated dataset (e.g. to try a different
+--train-steps/--lr without re-playing thousands of HeuristicBot games) skips
+generation entirely:
+  uv run python scripts/bootstrap_heuristic.py --load-samples scripts/output/datasets/bootstrap.pkl \
+      --train-steps 5000 --checkpoint-out scripts/output/checkpoints/bootstrap2/latest.pt \
+      --log-dir scripts/output/runs/bootstrap2
+
+Generation prints a progress line every --progress-interval-seconds. If
+--samples-out is set, it also checkpoints whatever samples exist so far to
+that path every --checkpoint-interval-seconds, and once more immediately on
+Ctrl+C - so interrupting a long `--games 100000` run still leaves a usable
+(if smaller) dataset on disk instead of losing everything back to nothing.
 """
 
 from __future__ import annotations
@@ -28,12 +41,12 @@ import time
 import numpy as np
 import torch
 
-from skyjo.rl.bootstrap import generate_heuristic_dataset
+from skyjo.rl.bootstrap import generate_heuristic_dataset, load_replay_samples, save_replay_samples
 from skyjo.rl.checkpoint import save_checkpoint
 from skyjo.rl.metrics import MetricsLogger
 from skyjo.rl.network import AlphaZeroNet
 from skyjo.rl.replay_buffer import ReplayBuffer
-from skyjo.rl.selfplay import DEFAULT_MAX_STEPS
+from skyjo.rl.selfplay import DEFAULT_MAX_STEPS, ReplaySample
 from skyjo.rl.train import collate_batch, training_step
 
 
@@ -55,26 +68,108 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint-out", default="scripts/output/checkpoints/bootstrap/latest.pt")
     parser.add_argument("--log-dir", default="scripts/output/runs/bootstrap")
+    parser.add_argument(
+        "--load-samples",
+        default=None,
+        help="Path to a dataset previously written by --samples-out; if given, skips game "
+        "generation entirely (--games/--min-players/--max-players/--max-steps-per-episode/"
+        "--workers/--seed are ignored).",
+    )
+    parser.add_argument(
+        "--samples-out",
+        default=None,
+        help="Path to pickle the generated (or loaded) samples to, for reuse across training runs "
+        "without replaying games. Also checkpointed periodically during generation (see "
+        "--checkpoint-interval-seconds) so an interrupted run doesn't lose its progress.",
+    )
+    parser.add_argument("--progress-interval-seconds", type=float, default=2.0)
+    parser.add_argument("--checkpoint-interval-seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--skip-training",
+        action="store_true",
+        help="stop right after generating/loading (and, if --samples-out is set, saving) the dataset - "
+        "for when this script is only being used to produce a dataset, not a checkpoint.",
+    )
     return parser.parse_args()
+
+
+def _generate_with_progress(args: argparse.Namespace) -> tuple[list[ReplaySample], int, float]:
+    """Runs `generate_heuristic_dataset`, printing progress and (if
+    `--samples-out` is set) periodically checkpointing samples to disk as
+    games complete. On Ctrl+C, saves once more immediately and exits instead
+    of propagating the interrupt - `generate_heuristic_dataset` itself never
+    returns on interrupt, so this is the only place partial progress is kept.
+    """
+    samples: list[ReplaySample] = []
+    failed_games = 0
+    games_done = 0
+    start = time.monotonic()
+    last_progress = start
+    last_checkpoint = start
+
+    def on_game_done(episode_samples: list[ReplaySample], failed: bool) -> None:
+        nonlocal failed_games, games_done, last_progress, last_checkpoint
+        games_done += 1
+        samples.extend(episode_samples)
+        if failed:
+            failed_games += 1
+
+        now = time.monotonic()
+        if now - last_progress >= args.progress_interval_seconds or games_done == args.games:
+            elapsed = now - start
+            rate = games_done / elapsed if elapsed > 0 else 0.0
+            print(
+                f"[{games_done}/{args.games}] samples={len(samples)} failed={failed_games} "
+                f"elapsed={elapsed:.1f}s ({rate:.1f} games/s)"
+            )
+            last_progress = now
+        if args.samples_out is not None and now - last_checkpoint >= args.checkpoint_interval_seconds:
+            save_replay_samples(samples, args.samples_out)
+            print(f"checkpointed {len(samples)} samples to {args.samples_out}")
+            last_checkpoint = now
+
+    try:
+        samples, failed_games = generate_heuristic_dataset(
+            args.games,
+            min_players=args.min_players,
+            max_players=args.max_players,
+            max_steps=args.max_steps_per_episode,
+            workers=args.workers,
+            seed=args.seed,
+            on_game_done=on_game_done,
+        )
+    except KeyboardInterrupt:
+        print(f"\ninterrupted after {games_done}/{args.games} games - keeping {len(samples)} samples generated so far")
+        if args.samples_out is not None:
+            save_replay_samples(samples, args.samples_out)
+            print(f"saved {len(samples)} samples to {args.samples_out}")
+        raise SystemExit(0) from None
+
+    return samples, failed_games, time.monotonic() - start
 
 
 def main() -> None:
     args = _parse_args()
     network_kwargs = {"trunk_dim": args.trunk_dim, "num_residual_blocks": args.residual_blocks}
 
-    start = time.monotonic()
-    samples, failed_games = generate_heuristic_dataset(
-        args.games,
-        min_players=args.min_players,
-        max_players=args.max_players,
-        max_steps=args.max_steps_per_episode,
-        workers=args.workers,
-        seed=args.seed,
-    )
-    print(
-        f"generated {len(samples)} samples from {args.games - failed_games}/{args.games} games "
-        f"({failed_games} failed) in {time.monotonic() - start:.1f}s"
-    )
+    if args.load_samples is not None:
+        start = time.monotonic()
+        samples = load_replay_samples(args.load_samples)
+        print(f"loaded {len(samples)} samples from {args.load_samples} in {time.monotonic() - start:.1f}s")
+    else:
+        samples, failed_games, elapsed = _generate_with_progress(args)
+        print(
+            f"generated {len(samples)} samples from {args.games - failed_games}/{args.games} games "
+            f"({failed_games} failed) in {elapsed:.1f}s"
+        )
+
+    if args.samples_out is not None:
+        save_replay_samples(samples, args.samples_out)
+        print(f"saved {len(samples)} samples to {args.samples_out}")
+
+    if args.skip_training:
+        return
+
     if len(samples) < args.batch_size:
         raise SystemExit(f"only {len(samples)} samples generated, need at least --batch-size={args.batch_size}")
 

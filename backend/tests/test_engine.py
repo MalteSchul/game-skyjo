@@ -413,6 +413,31 @@ def test_place_targeting_a_cleared_slot_is_illegal():
         apply_action(state, Action(ActionType.PLACE, position=0))
 
 
+def test_apply_action_validate_false_skips_the_legality_check():
+    board0 = _board_from_values(list(range(12)))
+    board1 = _board_from_values(list(range(12)))
+    state = _state((board0, board1), stock=(1,), discard=(2,), phase="awaiting_draw")
+    action = Action(ActionType.DRAW_STOCK)  # legal here, so the two calls must agree
+
+    validated = apply_action(state, action)
+    unvalidated = apply_action(state, action, validate=False)
+
+    assert validated == unvalidated
+
+
+def test_apply_action_validate_false_does_not_raise_on_an_illegal_action():
+    board0 = _board_from_values(list(range(12)))
+    board1 = _board_from_values(list(range(12)))
+    state = _state((board0, board1), stock=(1,), discard=(2,), phase="awaiting_draw")
+
+    # PLACE is illegal in "awaiting_draw" (no drawn_card yet) - the default
+    # (validate=True) path raises for it; validate=False is a trusted-caller
+    # opt-out of that check, not a guarantee the result is meaningful.
+    with pytest.raises(IllegalActionError):
+        apply_action(state, Action(ActionType.PLACE, position=0))
+    apply_action(state, Action(ActionType.PLACE, position=0), validate=False)
+
+
 def test_legal_actions_is_empty_once_round_or_match_is_over():
     board0 = _board_from_values(list(range(12)))
     board1 = _board_from_values(list(range(12)))

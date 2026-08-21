@@ -50,7 +50,7 @@ from skyjo.rl.checkpoint import load_checkpoint
 from skyjo.rl.loop import LoopState, TrainingConfig, run_training_loop
 from skyjo.rl.metrics import MetricsLogger
 from skyjo.rl.network import AlphaZeroNet
-from skyjo.rl.selfplay import DEFAULT_MAX_STEPS
+from skyjo.rl.selfplay import DEFAULT_MAX_ROUNDS, DEFAULT_MAX_STEPS, DEFAULT_ROUND_MAX_STEPS
 
 
 def _parse_args() -> argparse.Namespace:
@@ -60,7 +60,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--num-simulations", type=int, default=200)
     parser.add_argument("--min-players", type=int, default=2)
     parser.add_argument("--max-players", type=int, default=2)
-    parser.add_argument("--tau-moves", type=int, default=15, help="decisions per episode kept at tau=1 before annealing to greedy")
+    parser.add_argument("--tau", type=float, default=1.0, help="fixed tau for every self-play decision - not 0.0 by default, see TrainingConfig.tau's docstring")
     parser.add_argument("--c-puct", type=float, default=1.5)
     parser.add_argument("--dirichlet-alpha", type=float, default=0.3)
     parser.add_argument("--dirichlet-epsilon", type=float, default=0.25)
@@ -76,9 +76,25 @@ def _parse_args() -> argparse.Namespace:
         "--max-steps-per-episode",
         type=int,
         default=DEFAULT_MAX_STEPS,
-        help="cap on decision points per self-play game before it's abandoned as failed. "
-        "Lower this to fail a stuck/looping game faster rather than burn wall-clock on it "
-        "before the resilience skip kicks in.",
+        help="cap on decision points per self-play game before it's abandoned as failed. Keep "
+        "comfortably above --round-max-steps * --max-rounds (worst case) or every game fails "
+        "before those safety valves get a chance to work.",
+    )
+    parser.add_argument(
+        "--round-max-steps",
+        type=int,
+        default=DEFAULT_ROUND_MAX_STEPS,
+        help="a round running this long without closing naturally gets force-closed instead of "
+        "letting the whole game fail - see selfplay.DEFAULT_ROUND_MAX_STEPS's docstring for why a "
+        "round can legitimately never end on its own (an untrained/low-search policy has no "
+        "pressure to reveal new information).",
+    )
+    parser.add_argument(
+        "--max-rounds",
+        type=int,
+        default=DEFAULT_MAX_ROUNDS,
+        help="after this many rounds close (naturally or forced) without reaching target_score, the "
+        "game just ends there on whatever total_scores currently stand.",
     )
     parser.add_argument(
         "--workers",
@@ -102,6 +118,21 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-every", type=int, default=1, help="iterations between checkpoint writes")
     parser.add_argument("--resume", help="path to a checkpoint (e.g. .../latest.pt) to resume from")
     parser.add_argument("--log-dir", default="scripts/output/runs/default")
+    parser.add_argument(
+        "--eval-every",
+        type=int,
+        default=None,
+        help="iterations between heuristic-eval checks (default: unset, no periodic eval). Logged under "
+        "the 'eval/' prefix in the same run as train/self_play metrics - see rl.evaluator.evaluate_vs_heuristic.",
+    )
+    parser.add_argument("--eval-games", type=int, default=20, help="games per heuristic-eval check")
+    parser.add_argument(
+        "--eval-num-simulations",
+        type=int,
+        default=20,
+        help="MCTS simulations per move during heuristic-eval - deliberately smaller than "
+        "--num-simulations, a cheap diagnostic rather than a rigorous benchmark",
+    )
     return parser.parse_args()
 
 
@@ -132,11 +163,13 @@ def main() -> None:
         num_simulations=args.num_simulations,
         min_players=args.min_players,
         max_players=args.max_players,
-        tau_moves=args.tau_moves,
+        tau=args.tau,
         c_puct=args.c_puct,
         dirichlet_alpha=args.dirichlet_alpha,
         dirichlet_epsilon=args.dirichlet_epsilon,
         max_steps_per_episode=args.max_steps_per_episode,
+        round_max_steps=args.round_max_steps,
+        max_rounds=args.max_rounds,
         buffer_capacity=args.buffer_capacity,
         batch_size=args.batch_size,
         train_steps_per_iteration=args.train_steps_per_iteration,
@@ -149,6 +182,9 @@ def main() -> None:
         seed=args.seed,
         checkpoint_dir=args.checkpoint_dir,
         checkpoint_every=args.checkpoint_every,
+        eval_every=args.eval_every,
+        eval_games=args.eval_games,
+        eval_num_simulations=args.eval_num_simulations,
     )
     print(f"self-play concurrency: workers={workers} selfplay_batch_size={selfplay_batch_size}")
 

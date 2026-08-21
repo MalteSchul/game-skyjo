@@ -78,7 +78,16 @@ def generate_episode(
     max_steps: int = DEFAULT_MAX_STEPS,
     round_max_steps: int = DEFAULT_ROUND_MAX_STEPS,
     max_rounds: int = DEFAULT_MAX_ROUNDS,
+    round_stats_sink: list[tuple[int, tuple[int, ...]]] | None = None,
 ) -> list[ReplaySample]:
+    """`round_stats_sink`, if given, has `(round_count, final total_scores)`
+    appended on completion - `round_count` counts every round close (natural
+    or forced), matching what `max_rounds` bounds. Exists so a caller (e.g.
+    `rl.loop.run_training_loop`) can derive an `avg_points_per_round` health
+    signal without this function needing to know how that's aggregated or
+    logged - same side-channel idea as `evaluator.make_network_evaluator`'s
+    `rank_probs_sink`.
+    """
     rng = rng if rng is not None else np.random.default_rng()
     state = initial_state
     n_act = len(state.boards)
@@ -120,6 +129,9 @@ def generate_episode(
     else:
         raise RuntimeError(f"generate_episode: match did not reach game_over within {max_steps} steps")
 
+    if round_stats_sink is not None:
+        round_stats_sink.append((round_count, tuple(int(s) for s in state.total_scores)))
+
     y = np.asarray(final_ranks(state.total_scores), dtype=np.int64)
     return [ReplaySample(state=s, n_act=n_act, pi=pi_vector, y=y) for s, pi_vector in pending]
 
@@ -137,6 +149,7 @@ def generate_episodes_batch(
     max_steps: int = DEFAULT_MAX_STEPS,
     round_max_steps: int = DEFAULT_ROUND_MAX_STEPS,
     max_rounds: int = DEFAULT_MAX_ROUNDS,
+    round_stats_sink: list[tuple[int, tuple[int, ...]]] | None = None,
 ) -> list[list[ReplaySample]]:
     """Batched sibling of `generate_episode`: plays `len(initial_states)`
     games to completion concurrently instead of one after another, using
@@ -158,6 +171,10 @@ def generate_episodes_batch(
     `generate_episode`'s `max_steps` does - a `round_over` transition is
     resolved before it can consume a round. Immaterial in practice given
     `DEFAULT_MAX_STEPS`'s size, but not byte-for-byte the same bound.
+
+    `round_stats_sink`, if given, has `(round_count, final total_scores)`
+    appended once per game, in `initial_states` order - see
+    `generate_episode`'s docstring for why this exists.
     """
     n = len(initial_states)
     if n == 0:
@@ -236,6 +253,8 @@ def generate_episodes_batch(
     for i in range(n):
         y = np.asarray(final_ranks(states[i].total_scores), dtype=np.int64)
         results.append([ReplaySample(state=s, n_act=n_acts[i], pi=pi_vector, y=y) for s, pi_vector in pending[i]])
+        if round_stats_sink is not None:
+            round_stats_sink.append((round_counts[i], tuple(int(s) for s in states[i].total_scores)))
     return results
 
 

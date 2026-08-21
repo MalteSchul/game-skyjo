@@ -123,8 +123,17 @@ def legal_actions(state: GameState) -> list[Action]:
     return actions
 
 
-def apply_action(state: GameState, action: Action) -> GameState:
-    if action not in legal_actions(state):
+def apply_action(state: GameState, action: Action, *, validate: bool = True) -> GameState:
+    """`validate=False` skips the `action in legal_actions(state)` check -
+    for trusted internal callers only (currently `rl.mcts`'s tree-walk, which
+    only ever applies an action it already pulled from that same state's own
+    `legal_actions`/`Turn.legal_actions`, and recomputing the full list again
+    here just to re-confirm it was a no-op every single call). Every other
+    caller (the API layer, bots, tests) keeps the default - this must never
+    change what a legal/illegal action resolves to, only skip redundant work
+    when the caller already knows the answer.
+    """
+    if validate and action not in legal_actions(state):
         raise IllegalActionError(f"{action} is not legal in phase {state.phase!r}")
 
     if action.type is ActionType.FLIP_INITIAL:

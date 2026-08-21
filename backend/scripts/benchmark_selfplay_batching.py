@@ -47,7 +47,11 @@ def _parse_args() -> argparse.Namespace:
         default=300,
         help="cap per game (default DEFAULT_MAX_STEPS=5000 is far too loose for a throughput "
         "benchmark - a rare tie-locked game at low num_simulations should fail fast, not burn "
-        "thousands of seconds before this script reports anything)",
+        "thousands of seconds before this script reports anything). Since selfplay.py's "
+        "force_close_round safety valve landed, this needs to stay above its worst case "
+        "(round_max_steps=200 * max_rounds=10 = 2000) or every game fails before that valve gets "
+        "a chance to work - confirmed 2026-08-21: --max-steps 300 failed 100% of games at "
+        "num_simulations=3 (workers=2, batch_size=32, games=64), --max-steps 2500 completed all of them.",
     )
     parser.add_argument(
         "--out",
@@ -64,10 +68,10 @@ def _run_scenario(net: AlphaZeroNet, config: TrainingConfig, seed: int) -> dict[
     t0 = time.perf_counter()
     if config.selfplay_batch_size <= 1:
         jobs = _build_jobs(config, rng, failure_log_path="benchmark_failures.log")
-        samples, failed = run_self_play_iteration(net, config, jobs)
+        samples, failed, _round_stats = run_self_play_iteration(net, config, jobs)
     else:
         jobs = _build_batch_jobs(config, rng, failure_log_path="benchmark_failures.log")
-        samples, failed = run_self_play_iteration_batched(net, config, jobs)
+        samples, failed, _round_stats = run_self_play_iteration_batched(net, config, jobs)
     elapsed = time.perf_counter() - t0
     return {
         "seconds": elapsed,

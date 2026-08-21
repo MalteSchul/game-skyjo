@@ -4,6 +4,7 @@ import torch
 
 from skyjo.domain.engine import new_match
 from skyjo.rl.action_space import ACTION_SPACE_SIZE
+from skyjo.rl.encoding import encode_state
 from skyjo.rl.network import AlphaZeroNet
 from skyjo.rl.selfplay import ReplaySample
 from skyjo.rl.train import collate_batch, compute_loss, training_step
@@ -35,6 +36,17 @@ def test_collate_batch_produces_correctly_shaped_tensors():
     assert batch.pi_target.shape == (2, ACTION_SPACE_SIZE)
     assert batch.y.shape == (2, 8)
     assert batch.y[0, 2:].tolist() == [0, 0, 0, 0, 0, 0]  # padding beyond n_act=2
+
+
+def test_collate_batch_with_precomputed_encodings_matches_recomputing_them():
+    samples = [_sample(1, 2, [0, 1]), _sample(2, 5, [3, 1, 0, 4, 2])]
+    encodings = [encode_state(s.state) for s in samples]
+
+    recomputed = collate_batch(samples)
+    precomputed = collate_batch(samples, encodings=encodings)
+
+    torch.testing.assert_close(precomputed.features, recomputed.features)
+    torch.testing.assert_close(precomputed.legal_action_mask, recomputed.legal_action_mask)
 
 
 def test_compute_loss_returns_finite_positive_losses_with_expected_keys():
@@ -79,3 +91,10 @@ def test_rank_loss_ignores_padding_beyond_n_act():
 def test_collate_batch_rejects_an_empty_sample_list():
     with pytest.raises(ValueError):
         collate_batch([])
+
+
+def test_collate_batch_rejects_mismatched_encodings_length():
+    samples = [_sample(1, 2, [0, 1]), _sample(2, 5, [3, 1, 0, 4, 2])]
+
+    with pytest.raises(ValueError):
+        collate_batch(samples, encodings=[encode_state(samples[0].state)])

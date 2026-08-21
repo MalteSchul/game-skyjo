@@ -4,12 +4,21 @@ No search or network evaluation is needed, so games are cheap and reliably
 finish, giving real win/loss outcomes (and an imitation-learned policy
 target) to seed training on before switching to `skyjo.rl.loop`'s real,
 MCTS-driven self-play loop.
+
+`save_replay_samples`/`load_replay_samples` cache that dataset on disk: since
+`ReplaySample` holds the raw `GameState` rather than an encoded feature
+vector (encoding happens later, in `collate_batch`), a cached dataset stays
+valid even across changes to `skyjo.rl.encoding` - only regenerating it
+(replaying `HeuristicBot` games) is expensive, not re-encoding it.
 """
 
 from __future__ import annotations
 
+import pickle
+from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -44,6 +53,7 @@ def generate_heuristic_dataset(
     max_steps: int = DEFAULT_MAX_STEPS,
     workers: int = 0,
     seed: int = 0,
+    on_game_done: Callable[[list[ReplaySample], bool], None] | None = None,
 ) -> tuple[list[ReplaySample], int]:
     """Returns (samples, failed_game_count) from `num_games` HeuristicBot-vs-
     HeuristicBot games (each seat gets its own seed, for tie-break variety).
@@ -52,6 +62,16 @@ def generate_heuristic_dataset(
     is what keeps this fast and deterministic to unit-test; `workers > 1`
     spawns a plain `ProcessPoolExecutor` (no shared state needed across
     workers, unlike MCTS self-play's network broadcast in `rl.loop`).
+
+    `on_game_done`, if given, is called once per completed game (in
+    completion order) with that game's samples (empty if the game failed)
+    and whether it failed. Games are consumed one at a time rather than
+    materialized as a whole batch first, so a caller can use this to report
+    progress and checkpoint partial results to disk as they arrive: if this
+    function is interrupted (e.g. `KeyboardInterrupt`) partway through, it
+    never returns, but every already-completed game was already handed to
+    `on_game_done` - that's the caller's route to keeping what was generated
+    before the interruption instead of losing all of it.
     """
     if num_games <= 0:
         raise ValueError("generate_heuristic_dataset: num_games must be > 0")
@@ -68,17 +88,47 @@ def generate_heuristic_dataset(
         for game_seed, player_count in zip(game_seeds, player_counts, strict=True)
     ]
 
-    if workers <= 1:
-        results = [_play_one_bot_game(job) for job in jobs]
-    else:
-        with ProcessPoolExecutor(max_workers=workers) as pool:
-            results = list(pool.map(_play_one_bot_game, jobs))
-
     samples: list[ReplaySample] = []
     failed_games = 0
-    for episode_samples in results:
+
+    def _consume(episode_samples: list[ReplaySample]) -> None:
+        nonlocal failed_games
         if episode_samples:
             samples.extend(episode_samples)
         else:
             failed_games += 1
+        if on_game_done is not None:
+            on_game_done(episode_samples, not episode_samples)
+
+    if workers <= 1:
+        for job in jobs:
+            _consume(_play_one_bot_game(job))
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            for episode_samples in pool.map(_play_one_bot_game, jobs):
+                _consume(episode_samples)
+
     return samples, failed_games
+
+
+def save_replay_samples(samples: Sequence[ReplaySample], path: str | Path) -> None:
+    """Pickles `samples` to `path` via temp file + atomic rename (mirroring
+    `checkpoint.save_checkpoint`), so a crash mid-write can't corrupt a
+    dataset that took a real generation run to produce.
+    """
+    if not samples:
+        raise ValueError("save_replay_samples: samples must be non-empty")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with tmp_path.open("wb") as f:
+        pickle.dump(list(samples), f, protocol=pickle.HIGHEST_PROTOCOL)
+    tmp_path.replace(path)
+
+
+def load_replay_samples(path: str | Path) -> list[ReplaySample]:
+    with Path(path).open("rb") as f:
+        samples = pickle.load(f)
+    if not samples:
+        raise ValueError(f"load_replay_samples: {path} contains no samples")
+    return samples

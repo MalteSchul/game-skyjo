@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import time
 import traceback
-from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -34,7 +33,11 @@ import torch
 
 from skyjo.domain.engine import MAX_PLAYERS, MIN_PLAYERS, new_match
 from skyjo.rl.checkpoint import save_checkpoint
-from skyjo.rl.evaluator import make_batch_network_evaluator, make_network_evaluator
+from skyjo.rl.evaluator import (
+    evaluate_vs_heuristic,
+    make_batch_network_evaluator,
+    make_network_evaluator,
+)
 from skyjo.rl.mcts import (
     DEFAULT_C_PUCT,
     DEFAULT_DIRICHLET_ALPHA,
@@ -46,7 +49,9 @@ from skyjo.rl.metrics import MetricsLogger
 from skyjo.rl.network import AlphaZeroNet
 from skyjo.rl.replay_buffer import ReplayBuffer
 from skyjo.rl.selfplay import (
+    DEFAULT_MAX_ROUNDS,
     DEFAULT_MAX_STEPS,
+    DEFAULT_ROUND_MAX_STEPS,
     ReplaySample,
     generate_episode,
     generate_episodes_batch,
@@ -61,16 +66,15 @@ class TrainingConfig:
     num_simulations: int = 200
     min_players: int = MIN_PLAYERS
     max_players: int = MIN_PLAYERS
-    tau_moves: int = 15
-    tau_high: float = 1.0
-    # Deliberately not 0.0: `visit_distribution`'s tau<=1e-3 path breaks ties
+    # One fixed tau for every decision in an episode - no annealing schedule.
+    # Not 0.0 by default: `visit_distribution`'s tau<=1e-3 path breaks ties
     # deterministically (first-max, no randomization), and low simulation
     # counts or an early undertrained network both produce lots of exactly-
     # tied visit counts - `MctsBot` avoids the same trap with an explicit
     # random tie-break (see bots/mcts_bot.py), but self-play here samples
     # from `visit_distribution` instead, so a small residual randomness is
     # what keeps a game from looping on the same tied action pair forever.
-    tau_low: float = 0.05
+    tau: float = 1.0
     c_puct: float = DEFAULT_C_PUCT
     dirichlet_alpha: float = DEFAULT_DIRICHLET_ALPHA
     dirichlet_epsilon: float = DEFAULT_DIRICHLET_EPSILON
@@ -83,6 +87,16 @@ class TrainingConfig:
     l2_coef: float = DEFAULT_L2_COEF
     network_kwargs: dict[str, Any] = field(default_factory=dict)
     max_steps_per_episode: int = DEFAULT_MAX_STEPS
+    # Safety valves against a stuck round/game - see selfplay.py's
+    # DEFAULT_ROUND_MAX_STEPS/DEFAULT_MAX_ROUNDS docstrings for why a round
+    # can legitimately never end on its own. max_steps_per_episode above is
+    # now expected to be near-unreachable rather than the routine failure
+    # path it used to be - keep it comfortably above round_max_steps *
+    # max_rounds (worst case) or every game fails before these valves get a
+    # chance to work (see benchmark_selfplay_batching.py's --max-steps help
+    # for a concrete example of this exact trap).
+    round_max_steps: int = DEFAULT_ROUND_MAX_STEPS
+    max_rounds: int = DEFAULT_MAX_ROUNDS
     workers: int = 0
     # 1 (default) = today's behavior: each job plays one game at a time,
     # evaluating its MCTS leaves one state per network call. >1 groups
@@ -95,6 +109,18 @@ class TrainingConfig:
     seed: int = 0
     checkpoint_dir: str | None = None
     checkpoint_every: int = 1
+    # None (default) = no periodic eval. Otherwise, every `eval_every`
+    # iterations, play `eval_games` games of this iteration's net vs
+    # HeuristicBot (see `evaluator.evaluate_vs_heuristic`) and log
+    # win_rate/avg_rank/avg_points under the "eval/" prefix - a cheap "are we
+    # still improving" signal alongside the self_play/train scalars in the
+    # same MetricsLogger run, not a rigorous benchmark (`eval_num_simulations`
+    # defaults far below production self-play's `num_simulations` on purpose).
+    # Always the same seed, so every eval call plays the identical game set -
+    # comparable across iterations instead of noise from a different sample.
+    eval_every: int | None = None
+    eval_games: int = 20
+    eval_num_simulations: int = 20
 
     def __post_init__(self) -> None:
         if self.iterations <= 0:
@@ -116,12 +142,22 @@ class TrainingConfig:
             raise ValueError("TrainingConfig: train_steps_per_iteration must be >= 0")
         if self.max_steps_per_episode <= 0:
             raise ValueError("TrainingConfig: max_steps_per_episode must be > 0")
+        if self.round_max_steps <= 0:
+            raise ValueError("TrainingConfig: round_max_steps must be > 0")
+        if self.max_rounds <= 0:
+            raise ValueError("TrainingConfig: max_rounds must be > 0")
         if self.workers < 0:
             raise ValueError("TrainingConfig: workers must be >= 0")
         if self.selfplay_batch_size < 1:
             raise ValueError("TrainingConfig: selfplay_batch_size must be >= 1")
         if self.checkpoint_every <= 0:
             raise ValueError("TrainingConfig: checkpoint_every must be > 0")
+        if self.eval_every is not None and self.eval_every <= 0:
+            raise ValueError("TrainingConfig: eval_every must be > 0 if given")
+        if self.eval_games <= 0:
+            raise ValueError("TrainingConfig: eval_games must be > 0")
+        if self.eval_num_simulations < 0:
+            raise ValueError("TrainingConfig: eval_num_simulations must be >= 0")
 
 
 @dataclass
@@ -130,33 +166,18 @@ class LoopState:
     total_train_steps: int = 0
 
 
-def make_tau_schedule(tau_moves: int, high: float = 1.0, low: float = 0.0) -> Callable[[int], float]:
-    """Explore (tau=`high`) for the first `tau_moves` decisions of an episode,
-    then switch to near-greedy (tau=`low`) - the standard AlphaZero anneal so
-    early-game training data stays diverse while later moves target the
-    search's actual best line.
-    """
-    if tau_moves < 0:
-        raise ValueError("make_tau_schedule: tau_moves must be >= 0")
-
-    def schedule(step: int) -> float:
-        return high if step < tau_moves else low
-
-    return schedule
-
-
 @dataclass(frozen=True)
 class _SelfPlayJob:
     seed: int
     player_count: int
     num_simulations: int
-    tau_moves: int
-    tau_high: float
-    tau_low: float
+    tau: float
     c_puct: float
     dirichlet_alpha: float
     dirichlet_epsilon: float
     max_steps: int
+    round_max_steps: int
+    max_rounds: int
     failure_log_path: str
 
 
@@ -197,8 +218,8 @@ def _log_failure(job: _SelfPlayJob, exc: Exception) -> None:
         f.write("\n")
 
 
-def _play_one_game(job: _SelfPlayJob) -> list[ReplaySample]:
-    """Returns `[]` (never raises) if this one game fails - a still-unresolved,
+def _play_one_game(job: _SelfPlayJob) -> tuple[list[ReplaySample], tuple[int, tuple[int, ...]] | None]:
+    """Returns `([], None)` (never raises) if this one game fails - a still-unresolved,
     rare `hidden_info` bookkeeping bug (see rl/hidden_info.py), a game that
     runs past `max_steps`, or any other bug in the self-play path can
     otherwise take down an entire iteration's worth of sibling games (or, in
@@ -221,22 +242,26 @@ def _play_one_game(job: _SelfPlayJob) -> list[ReplaySample]:
         raise RuntimeError("_play_one_game: worker was not initialized via _init_worker")
     rng = np.random.default_rng(job.seed)
     initial_state = new_match(player_count=job.player_count, seed=job.seed)
-    tau_schedule = make_tau_schedule(job.tau_moves, job.tau_high, job.tau_low)
+    round_stats: list[tuple[int, tuple[int, ...]]] = []
     try:
-        return generate_episode(
+        samples = generate_episode(
             initial_state,
             _worker_evaluate,
             num_simulations=job.num_simulations,
-            tau_schedule=tau_schedule,
+            tau_schedule=job.tau,
             c_puct=job.c_puct,
             dirichlet_alpha=job.dirichlet_alpha,
             dirichlet_epsilon=job.dirichlet_epsilon,
             rng=rng,
             max_steps=job.max_steps,
+            round_max_steps=job.round_max_steps,
+            max_rounds=job.max_rounds,
+            round_stats_sink=round_stats,
         )
     except Exception as exc:  # noqa: BLE001 - deliberately blind, see docstring above
         _log_failure(job, exc)
-        return []
+        return [], None
+    return samples, round_stats[0] if round_stats else None
 
 
 @dataclass(frozen=True)
@@ -244,13 +269,13 @@ class _SelfPlayBatchJob:
     seeds: tuple[int, ...]
     player_counts: tuple[int, ...]
     num_simulations: int
-    tau_moves: int
-    tau_high: float
-    tau_low: float
+    tau: float
     c_puct: float
     dirichlet_alpha: float
     dirichlet_epsilon: float
     max_steps: int
+    round_max_steps: int
+    max_rounds: int
     failure_log_path: str
 
 
@@ -263,7 +288,7 @@ def _log_batch_failure(job: _SelfPlayBatchJob, exc: Exception) -> None:
         f.write("\n")
 
 
-def _play_batch_of_games(job: _SelfPlayBatchJob) -> list[ReplaySample]:
+def _play_batch_of_games(job: _SelfPlayBatchJob) -> tuple[list[ReplaySample], list[tuple[int, tuple[int, ...]]]]:
     """Plays `len(job.seeds)` games concurrently via `generate_episodes_batch`,
     batching every decision round's MCTS leaf evaluations across the whole
     group into one network call (see `rl.mcts.run_mcts_batch`).
@@ -281,23 +306,26 @@ def _play_batch_of_games(job: _SelfPlayBatchJob) -> list[ReplaySample]:
         for seed, player_count in zip(job.seeds, job.player_counts, strict=True)
     ]
     rngs = [np.random.default_rng(seed) for seed in job.seeds]
-    tau_schedule = make_tau_schedule(job.tau_moves, job.tau_high, job.tau_low)
+    round_stats: list[tuple[int, tuple[int, ...]]] = []
     try:
         results = generate_episodes_batch(
             initial_states,
             _worker_evaluate_batch,
             num_simulations=job.num_simulations,
-            tau_schedule=tau_schedule,
+            tau_schedule=job.tau,
             c_puct=job.c_puct,
             dirichlet_alpha=job.dirichlet_alpha,
             dirichlet_epsilon=job.dirichlet_epsilon,
             rngs=rngs,
             max_steps=job.max_steps,
+            round_max_steps=job.round_max_steps,
+            max_rounds=job.max_rounds,
+            round_stats_sink=round_stats,
         )
     except Exception as exc:  # noqa: BLE001 - deliberately blind, see docstring above
         _log_batch_failure(job, exc)
-        return []
-    return [sample for game_samples in results for sample in game_samples]
+        return [], []
+    return [sample for game_samples in results for sample in game_samples], round_stats
 
 
 def _build_batch_jobs(
@@ -311,13 +339,13 @@ def _build_batch_jobs(
             seeds=tuple(int(s) for s in seeds[start : start + batch_size]),
             player_counts=tuple(int(p) for p in player_counts[start : start + batch_size]),
             num_simulations=config.num_simulations,
-            tau_moves=config.tau_moves,
-            tau_high=config.tau_high,
-            tau_low=config.tau_low,
+            tau=config.tau,
             c_puct=config.c_puct,
             dirichlet_alpha=config.dirichlet_alpha,
             dirichlet_epsilon=config.dirichlet_epsilon,
             max_steps=config.max_steps_per_episode,
+            round_max_steps=config.round_max_steps,
+            max_rounds=config.max_rounds,
             failure_log_path=failure_log_path,
         )
         for start in range(0, config.games_per_iteration, batch_size)
@@ -326,11 +354,14 @@ def _build_batch_jobs(
 
 def run_self_play_iteration_batched(
     net: AlphaZeroNet, config: TrainingConfig, jobs: list[_SelfPlayBatchJob]
-) -> tuple[list[ReplaySample], int]:
+) -> tuple[list[ReplaySample], int, list[tuple[int, tuple[int, ...]]]]:
     """Batched sibling of `run_self_play_iteration`: each job plays a whole
     group of games concurrently (`_play_batch_of_games`) instead of one game
     at a time. `workers` still shards jobs (now groups, not single games)
     across processes exactly as before.
+
+    Returns (samples, failed_game_count, round_stats) - see
+    `run_self_play_iteration`'s docstring for what `round_stats` is.
     """
     state_dict = {k: v.detach().cpu() for k, v in net.state_dict().items()}
 
@@ -345,12 +376,14 @@ def run_self_play_iteration_batched(
 
     samples: list[ReplaySample] = []
     failed_games = 0
-    for job, group_samples in zip(jobs, group_results, strict=True):
+    round_stats: list[tuple[int, tuple[int, ...]]] = []
+    for job, (group_samples, group_round_stats) in zip(jobs, group_results, strict=True):
         if group_samples:
             samples.extend(group_samples)
+            round_stats.extend(group_round_stats)
         else:
             failed_games += len(job.seeds)
-    return samples, failed_games
+    return samples, failed_games, round_stats
 
 
 def _build_jobs(config: TrainingConfig, rng: np.random.Generator, failure_log_path: str) -> list[_SelfPlayJob]:
@@ -361,13 +394,13 @@ def _build_jobs(config: TrainingConfig, rng: np.random.Generator, failure_log_pa
             seed=int(seed),
             player_count=int(player_count),
             num_simulations=config.num_simulations,
-            tau_moves=config.tau_moves,
-            tau_high=config.tau_high,
-            tau_low=config.tau_low,
+            tau=config.tau,
             c_puct=config.c_puct,
             dirichlet_alpha=config.dirichlet_alpha,
             dirichlet_epsilon=config.dirichlet_epsilon,
             max_steps=config.max_steps_per_episode,
+            round_max_steps=config.round_max_steps,
+            max_rounds=config.max_rounds,
             failure_log_path=failure_log_path,
         )
         for seed, player_count in zip(seeds, player_counts, strict=True)
@@ -376,11 +409,16 @@ def _build_jobs(config: TrainingConfig, rng: np.random.Generator, failure_log_pa
 
 def run_self_play_iteration(
     net: AlphaZeroNet, config: TrainingConfig, jobs: list[_SelfPlayJob]
-) -> tuple[list[ReplaySample], int]:
-    """Returns (samples, failed_game_count). A real completed Skyjo game
-    always yields multiple decision points, so an empty per-job result
-    unambiguously means `_play_one_game` caught a failure for that job, not
-    a legitimately tiny game.
+) -> tuple[list[ReplaySample], int, list[tuple[int, tuple[int, ...]]]]:
+    """Returns (samples, failed_game_count, round_stats). A real completed
+    Skyjo game always yields multiple decision points, so an empty per-job
+    result unambiguously means `_play_one_game` caught a failure for that
+    job, not a legitimately tiny game.
+
+    `round_stats` has one `(round_count, final total_scores)` entry per
+    successful game - `run_training_loop` reduces it into an
+    `avg_points_per_round` health metric; kept as raw per-game data here so
+    this function doesn't need to know how that reduction is done.
     """
     state_dict = {k: v.detach().cpu() for k, v in net.state_dict().items()}
 
@@ -395,12 +433,15 @@ def run_self_play_iteration(
 
     samples: list[ReplaySample] = []
     failed_games = 0
-    for episode_samples in episode_results:
+    round_stats: list[tuple[int, tuple[int, ...]]] = []
+    for episode_samples, game_round_stats in episode_results:
         if episode_samples:
             samples.extend(episode_samples)
+            if game_round_stats is not None:
+                round_stats.append(game_round_stats)
         else:
             failed_games += 1
-    return samples, failed_games
+    return samples, failed_games, round_stats
 
 
 def run_training_loop(
@@ -428,18 +469,23 @@ def run_training_loop(
         self_play_start = time.monotonic()
         if config.selfplay_batch_size <= 1:
             jobs = _build_jobs(config, rng, failure_log_path)
-            samples, failed_games = run_self_play_iteration(net, config, jobs)
+            samples, failed_games, round_stats = run_self_play_iteration(net, config, jobs)
         else:
             batch_jobs = _build_batch_jobs(config, rng, failure_log_path)
-            samples, failed_games = run_self_play_iteration_batched(net, config, batch_jobs)
+            samples, failed_games, round_stats = run_self_play_iteration_batched(net, config, batch_jobs)
         for sample in samples:
             buffer.add(sample)
         successful_games = max(config.games_per_iteration - failed_games, 1)
+        total_rounds = sum(round_count for round_count, _ in round_stats)
+        avg_points_per_round = (
+            sum(float(np.mean(points)) for _, points in round_stats) / total_rounds if total_rounds > 0 else 0.0
+        )
         metrics.log(
             step,
             {
                 "self_play/samples_generated": len(samples),
                 "self_play/avg_moves_per_game": len(samples) / successful_games,
+                "self_play/avg_points_per_round": avg_points_per_round,
                 "self_play/failed_games": failed_games,
                 "self_play/seconds": time.monotonic() - self_play_start,
                 "buffer/size": len(buffer),
@@ -450,8 +496,8 @@ def run_training_loop(
         step_metrics: list[dict[str, float]] = []
         if len(buffer) >= min_buffer_size:
             for _ in range(config.train_steps_per_iteration):
-                batch_samples = buffer.sample_batch(config.batch_size, rng)
-                batch = collate_batch(batch_samples)
+                batch_samples, batch_encodings = buffer.sample_batch_with_encodings(config.batch_size, rng)
+                batch = collate_batch(batch_samples, encodings=batch_encodings)
                 step_metrics.append(
                     training_step(net, optimizer, batch, lambda_rank=config.lambda_rank, l2_coef=config.l2_coef)
                 )
@@ -465,6 +511,28 @@ def run_training_loop(
         metrics.log(step, train_log)
 
         state.iteration += 1
+
+        if config.eval_every is not None and state.iteration % config.eval_every == 0:
+            eval_start = time.monotonic()
+            eval_result = evaluate_vs_heuristic(
+                net,
+                config.eval_games,
+                num_simulations=config.eval_num_simulations,
+                c_puct=config.c_puct,
+                max_steps=config.max_steps_per_episode,
+                round_max_steps=config.round_max_steps,
+                max_rounds=config.max_rounds,
+                seed=config.seed,
+            )
+            metrics.log(
+                step,
+                {
+                    "eval/win_rate_vs_heuristic": eval_result.win_rate,
+                    "eval/avg_rank_vs_heuristic": eval_result.avg_rank,
+                    "eval/avg_points_vs_heuristic": eval_result.avg_points,
+                    "eval/seconds": time.monotonic() - eval_start,
+                },
+            )
 
         if config.checkpoint_dir is not None and state.iteration % config.checkpoint_every == 0:
             extra = {"config": asdict(config)}

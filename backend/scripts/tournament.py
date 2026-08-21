@@ -48,7 +48,11 @@ def _build_bot(spec: str, seed: int, *, num_simulations: int, trunk_dim: int, re
     return MctsBot(evaluate=evaluate, num_simulations=num_simulations, seed=seed)
 
 
-def _play_one_game(bots: list[Bot], seed: int, max_steps: int) -> tuple[int, ...]:
+def _play_one_game(bots: list[Bot], seed: int, max_steps: int) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Returns (ranks, points) - `points` is each seat's raw `total_scores`
+    at game end, since rank alone (0 = best) can't tell a narrow win from a
+    blowout.
+    """
     state = new_match(player_count=len(bots), seed=seed)
     for _ in range(max_steps):
         if state.phase == "round_over":
@@ -61,7 +65,7 @@ def _play_one_game(bots: list[Bot], seed: int, max_steps: int) -> tuple[int, ...
         state = apply_action(state, action)
     else:
         raise RuntimeError(f"tournament game did not finish within {max_steps} steps")
-    return tuple(final_ranks(state.total_scores))
+    return tuple(final_ranks(state.total_scores)), tuple(state.total_scores)
 
 
 @dataclass(frozen=True)
@@ -77,7 +81,7 @@ class _MatchJob:
     max_steps: int
 
 
-def _run_match(job: _MatchJob) -> tuple[str, str, tuple[int, int]] | None:
+def _run_match(job: _MatchJob) -> tuple[str, str, tuple[int, int], tuple[int, int]] | None:
     kwargs = {
         "num_simulations": job.num_simulations,
         "trunk_dim": job.trunk_dim,
@@ -86,11 +90,11 @@ def _run_match(job: _MatchJob) -> tuple[str, str, tuple[int, int]] | None:
     bot_a = _build_bot(job.spec_a, job.seed * 2, **kwargs)
     bot_b = _build_bot(job.spec_b, job.seed * 2 + 1, **kwargs)
     try:
-        ranks = _play_one_game([bot_a, bot_b], job.seed, job.max_steps)
+        ranks, points = _play_one_game([bot_a, bot_b], job.seed, job.max_steps)
     except RuntimeError as exc:
         print(f"_run_match: {job.name_a} vs {job.name_b} seed={job.seed} failed, skipping: {exc}")
         return None
-    return job.name_a, job.name_b, ranks
+    return job.name_a, job.name_b, ranks, points
 
 
 def _build_jobs(
@@ -151,6 +155,7 @@ def main() -> None:
     wins: dict[str, int] = defaultdict(int)
     games_played: dict[str, int] = defaultdict(int)
     rank_sum: dict[str, float] = defaultdict(float)
+    points_sum: dict[str, float] = defaultdict(float)
     pairwise_wins: dict[tuple[str, str], int] = defaultdict(int)
     failed = 0
 
@@ -158,22 +163,25 @@ def main() -> None:
         if result is None:
             failed += 1
             continue
-        name_a, name_b, (rank_a, rank_b) = result
+        name_a, name_b, (rank_a, rank_b), (points_a, points_b) = result
         games_played[name_a] += 1
         games_played[name_b] += 1
         rank_sum[name_a] += rank_a
         rank_sum[name_b] += rank_b
+        points_sum[name_a] += points_a
+        points_sum[name_b] += points_b
         winner, loser = (name_a, name_b) if rank_a < rank_b else (name_b, name_a)
         wins[winner] += 1
         pairwise_wins[(winner, loser)] += 1
 
     print(f"\n{failed} game(s) failed and were skipped\n")
-    print(f"{'entrant':<20}{'games':>8}{'wins':>8}{'win%':>8}{'avg_rank':>10}")
+    print(f"{'entrant':<20}{'games':>8}{'wins':>8}{'win%':>8}{'avg_rank':>10}{'avg_points':>12}")
     for name in sorted(entrants, key=lambda n: -wins[n] / max(games_played[n], 1)):
         played = games_played[name]
         win_pct = 100 * wins[name] / played if played else float("nan")
         avg_rank = rank_sum[name] / played if played else float("nan")
-        print(f"{name:<20}{played:>8}{wins[name]:>8}{win_pct:>7.1f}%{avg_rank:>10.3f}")
+        avg_points = points_sum[name] / played if played else float("nan")
+        print(f"{name:<20}{played:>8}{wins[name]:>8}{win_pct:>7.1f}%{avg_rank:>10.3f}{avg_points:>12.2f}")
 
     print("\npairwise win counts (row beat column):")
     names = sorted(entrants)

@@ -271,17 +271,25 @@ def _is_round_closing(state: GameState, action: Action) -> bool:
     return will_close_round(state, action)
 
 
+# All three `_advance_*` helpers below pass `validate=False` to `apply_action`:
+# every `action` they're given is `edge.action` from `_select_edge`, i.e. it
+# came out of this exact `state`'s own `node.edges` (built from
+# `Turn.from_state(state).legal_actions` in `_expand`) - re-checking
+# `action in legal_actions(state)` here would just recompute a list this
+# module already knows `action` is a member of, on every single simulated
+# transition (profiling: legal_actions was ~3x more often than leaves
+# expanded before this).
 def _advance_deterministic(state: GameState, action: Action) -> GameState:
     """Neither a reveal nor round-closing: nothing hidden is involved."""
-    return rescrub(apply_action(state, action))
+    return rescrub(apply_action(state, action, validate=False))
 
 
 def _advance_resolved_reveal(state: GameState, action: Action, value: int) -> GameState:
     """A single-card reveal, already resolved to `value` by a ChanceEdge."""
     if action.type is ActionType.DRAW_STOCK:
-        return rescrub(resolve_drawn_stock_card(apply_action(state, action), value))
+        return rescrub(resolve_drawn_stock_card(apply_action(state, action, validate=False), value))
     primed = resolve_reveal(state, action, value)
-    return rescrub(apply_action(primed, action))
+    return rescrub(apply_action(primed, action, validate=False))
 
 
 def _advance_round_closing(state: GameState, action: Action, rng: np.random.Generator) -> GameState:
@@ -299,7 +307,7 @@ def _advance_round_closing(state: GameState, action: Action, rng: np.random.Gene
         already_resolved = (state.current_player, action.position)
 
     patched = resolve_round_close(patched, rng, already_resolved=already_resolved)
-    next_state = rescrub(apply_action(patched, action))
+    next_state = rescrub(apply_action(patched, action, validate=False))
     while next_state.phase == "round_over":
         next_state = rescrub(start_next_round(next_state))
     return next_state
@@ -524,3 +532,22 @@ def sample_action(pi: dict[Action, float], rng: np.random.Generator) -> Action:
     probs = probs / probs.sum()
     index = rng.choice(len(actions), p=probs)
     return actions[index]
+
+
+def greedy_action(root: MCTSNode, rng: np.random.Generator) -> Action:
+    """Most-visited root action - the search's actual best line, for a live
+    bot/eval opponent rather than self-play's tau-sampled training targets.
+
+    Ties (common against an uninformative/untrained evaluator, e.g. every
+    edge visited once) are broken randomly rather than always taking the
+    same "first" edge: a deterministic tie-break can lock two such players
+    into repeating the same tied pair of actions forever (e.g.
+    draw-then-discard, never placing) since nothing about the state that
+    matters to the tie ever changes turn to turn.
+    """
+    if not root.edges:
+        raise ValueError("greedy_action: root has no legal actions (terminal or unexpanded)")
+    visits = {action: edge.visit_count for action, edge in root.edges.items()}
+    max_visits = max(visits.values())
+    best_actions = [action for action, count in visits.items() if count == max_visits]
+    return best_actions[0] if len(best_actions) == 1 else best_actions[rng.integers(len(best_actions))]
