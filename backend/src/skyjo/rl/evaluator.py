@@ -16,7 +16,9 @@ for the same reason: `skyjo.bots`' own `__init__.py` eagerly imports
 `bots.factory`, which imports `bots.mcts_bot` - so even a top-level `from
 skyjo.bots.heuristic_bot import HeuristicBot` here would trigger that same
 cycle by way of the package `__init__`, despite `heuristic_bot.py` itself
-having no dependency on this module.
+having no dependency on this module. It does, however, reuse its search tree
+across turns the same way `MctsBot` does live play - both share `rl.mcts
+.advance_cached_root`'s tree-walk rather than duplicating it.
 """
 
 from __future__ import annotations
@@ -39,11 +41,14 @@ from skyjo.domain.engine import (
 from skyjo.domain.observation import Turn
 from skyjo.rl.action_space import ACTION_SPACE_SIZE, index_to_action
 from skyjo.rl.encoding import encode_state
+from skyjo.rl.hidden_info import gamestate_from_turn
 from skyjo.rl.mcts import (
     DEFAULT_C_PUCT,
     BatchEvaluateFn,
     EvaluateFn,
     LeafResult,
+    MCTSNode,
+    advance_cached_root,
     greedy_action,
     run_mcts,
 )
@@ -182,6 +187,19 @@ def _play_one_eval_game(
     Same round_max_steps/max_rounds safety valves as `rl.selfplay.generate_episode`
     (`domain.engine.force_close_round`) - a low-simulation or early-untrained
     net can get the same non-progressing tie-lock here as in self-play.
+
+    Reuses the net's search tree across its own turns exactly as
+    `bots.mcts_bot.MctsBot` does live (via the same `rl.mcts
+    .advance_cached_root`), advancing it through the heuristic opponent's
+    moves too - a real single-line game is exactly the case reuse is safe
+    for. `num_simulations` is kept a *target total* per decision rather than
+    "always this many more": a reused root only runs the shortfall (`max(0,
+    num_simulations - cached_root.visit_count)`), so a net decision never
+    ends up backed by more total visits than a from-scratch search would've
+    given it - the whole point being that this diagnostic's numbers stay
+    governed by the same `num_simulations` knob whether or not reuse
+    actually fires for a given decision, not that reuse is free to make
+    later decisions in a game strictly more informed than earlier ones.
     """
     from skyjo.bots.heuristic_bot import (
         HeuristicBot,  # deferred to dodge a circular import, see module docstring
@@ -193,6 +211,7 @@ def _play_one_eval_game(
     state = new_match(player_count=2, seed=seed)
     round_step = 0
     round_count = 0
+    cached_root: MCTSNode | None = None
     for _ in range(max_steps):
         if state.phase == "round_over":
             round_count += 1
@@ -200,23 +219,40 @@ def _play_one_eval_game(
                 break
             state = start_next_round(state)
             round_step = 0
+            cached_root = None  # a fresh round is an independent shuffle - never cacheable across it
             continue
         if state.phase == "game_over":
             break
         if round_step >= round_max_steps:
             state = force_close_round(state)
             round_step = 0
+            cached_root = None  # force-closing bypasses the real transition the cache tracks
             continue
         turn = Turn.from_state(state)
         if turn.acting_player == heuristic_seat:
             action = heuristic_bot.choose_action(turn)
         else:
+            if cached_root is not None and cached_root.state != gamestate_from_turn(turn):
+                cached_root = None
+            already_visited = cached_root.visit_count if cached_root is not None else 0
             root = run_mcts(
-                turn, evaluate, num_simulations=num_simulations, c_puct=c_puct, add_root_noise=False, rng=rng
+                turn,
+                evaluate,
+                num_simulations=max(0, num_simulations - already_visited),
+                c_puct=c_puct,
+                add_root_noise=False,
+                rng=rng,
+                reuse_root=cached_root,
             )
             action = greedy_action(root, rng)
+            cached_root = root
         state = apply_action(state, action)
         round_step += 1
+        cached_root = (
+            None
+            if state.phase in ("round_over", "game_over")
+            else advance_cached_root(cached_root, turn, action, Turn.from_state(state))
+        )
     else:
         raise RuntimeError(f"_play_one_eval_game: seed={seed} did not finish within {max_steps} steps")
     return final_ranks(state.total_scores)[net_seat], state.total_scores[net_seat]

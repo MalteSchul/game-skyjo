@@ -1,3 +1,4 @@
+from collections import Counter
 from dataclasses import replace
 
 import numpy as np
@@ -16,6 +17,7 @@ from skyjo.domain.engine import legal_actions as engine_legal_actions
 from skyjo.domain.observation import Turn
 from skyjo.rl import hidden_info, mcts
 from skyjo.rl.mcts import (
+    ChanceEdge,
     ChanceNode,
     MCTSEdge,
     MCTSNode,
@@ -651,6 +653,121 @@ def test_reuse_root_rejects_a_root_whose_state_does_not_match_the_given_turn():
 
     with pytest.raises(ValueError):
         run_mcts(turn_b, _uniform_evaluate, num_simulations=1, reuse_root=root_a)
+
+
+# --- advance_cached_root / infer_revealed_value -------------------------------
+
+
+def _awaiting_draw_state(seed: int) -> GameState:
+    state = new_match(player_count=2, seed=seed)
+    while state.phase == "initial_flip":
+        state = apply_action(state, engine_legal_actions(state)[0])
+    return state
+
+
+def test_advance_cached_root_is_a_no_op_on_a_missing_cache():
+    turn = Turn.from_state(_awaiting_draw_state(seed=1))
+
+    assert mcts.advance_cached_root(None, turn, turn.legal_actions[0], turn) is None
+
+
+def test_advance_cached_root_clears_the_cache_when_turn_before_does_not_match():
+    turn = Turn.from_state(_awaiting_draw_state(seed=1))
+    root = MCTSNode(state=hidden_info.gamestate_from_turn(turn), n_act=2, is_terminal=False)
+    other_turn = Turn.from_state(_awaiting_draw_state(seed=2))
+
+    result = mcts.advance_cached_root(root, other_turn, other_turn.legal_actions[0], other_turn)
+
+    assert result is None
+
+
+def test_advance_cached_root_follows_a_deterministic_edge_to_its_child():
+    # DRAW_DISCARD is never a reveal (the discard top is already public) - a
+    # plain edge.child hop, no ChanceNode involved.
+    state = _awaiting_draw_state(seed=1)
+    turn_before = Turn.from_state(state)
+    action = Action(type=ActionType.DRAW_DISCARD)
+    assert action in turn_before.legal_actions
+    cached_state = hidden_info.gamestate_from_turn(turn_before)
+    expected_child = MCTSNode(state=cached_state, n_act=2, is_terminal=False)
+    root = MCTSNode(state=cached_state, n_act=2, is_terminal=False)
+    root.edges[action] = MCTSEdge(action=action, prior=1.0, n_act=2, child=expected_child)
+    turn_after = Turn.from_state(apply_action(state, action))
+
+    result = mcts.advance_cached_root(root, turn_before, action, turn_after)
+
+    assert result is expected_child
+
+
+def test_advance_cached_root_follows_a_matched_reveal_through_its_chance_node():
+    state = _awaiting_draw_state(seed=1)
+    turn_before = Turn.from_state(state)
+    action = Action(type=ActionType.DRAW_STOCK)
+    turn_after = Turn.from_state(apply_action(state, action))
+    real_value = turn_after.drawn_card
+    assert real_value is not None
+    cached_state = hidden_info.gamestate_from_turn(turn_before)
+    root = MCTSNode(state=cached_state, n_act=2, is_terminal=False)
+    expected_child = MCTSNode(state=cached_state, n_act=2, is_terminal=False)
+    chance = ChanceNode(n_act=2, counts=Counter({real_value: 1}))
+    chance.edges[real_value] = ChanceEdge(value=real_value, prior=1.0, n_act=2, child=expected_child)
+    root.edges[action] = MCTSEdge(action=action, prior=1.0, n_act=2, child=chance)
+
+    result = mcts.advance_cached_root(root, turn_before, action, turn_after)
+
+    assert result is expected_child
+
+
+def test_advance_cached_root_clears_the_cache_when_the_real_reveal_was_never_visited():
+    state = _awaiting_draw_state(seed=1)
+    turn_before = Turn.from_state(state)
+    action = Action(type=ActionType.DRAW_STOCK)
+    turn_after = Turn.from_state(apply_action(state, action))
+    real_value = turn_after.drawn_card
+    other_value = next(v for v in range(-2, 13) if v != real_value)
+    cached_state = hidden_info.gamestate_from_turn(turn_before)
+    root = MCTSNode(state=cached_state, n_act=2, is_terminal=False)
+    chance = ChanceNode(n_act=2, counts=Counter({other_value: 1}))
+    chance.edges[other_value] = ChanceEdge(
+        value=other_value, prior=1.0, n_act=2, child=MCTSNode(state=cached_state, n_act=2, is_terminal=False)
+    )
+    root.edges[action] = MCTSEdge(action=action, prior=1.0, n_act=2, child=chance)
+
+    result = mcts.advance_cached_root(root, turn_before, action, turn_after)
+
+    assert result is None
+
+
+def test_advance_cached_root_clears_the_cache_when_the_edge_was_never_expanded():
+    state = _awaiting_draw_state(seed=1)
+    turn_before = Turn.from_state(state)
+    action = Action(type=ActionType.DRAW_DISCARD)
+    cached_state = hidden_info.gamestate_from_turn(turn_before)
+    root = MCTSNode(state=cached_state, n_act=2, is_terminal=False)
+    root.edges[action] = MCTSEdge(action=action, prior=1.0, n_act=2)  # child left None: never visited
+    turn_after = Turn.from_state(apply_action(state, action))
+
+    result = mcts.advance_cached_root(root, turn_before, action, turn_after)
+
+    assert result is None
+
+
+def test_infer_revealed_value_reads_the_drawn_card_for_a_stock_draw():
+    state = _awaiting_draw_state(seed=1)
+    turn_before = Turn.from_state(state)
+    action = Action(type=ActionType.DRAW_STOCK)
+    turn_after = Turn.from_state(apply_action(state, action))
+
+    assert mcts.infer_revealed_value(turn_before, action, turn_after) == turn_after.drawn_card
+
+
+def test_infer_revealed_value_returns_none_for_a_position_less_action():
+    state = _awaiting_draw_state(seed=1)
+    turn_before = Turn.from_state(state)
+    action = Action(type=ActionType.DRAW_DISCARD)
+    turn_after = Turn.from_state(apply_action(state, action))
+
+    assert mcts.infer_revealed_value(turn_before, action, turn_after) is None
 
 
 # --- greedy_action -----------------------------------------------------------

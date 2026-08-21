@@ -623,3 +623,71 @@ def greedy_action(root: MCTSNode, rng: np.random.Generator) -> Action:
     max_visits = max(visits.values())
     best_actions = [action for action, count in visits.items() if count == max_visits]
     return best_actions[0] if len(best_actions) == 1 else best_actions[rng.integers(len(best_actions))]
+
+
+def infer_revealed_value(turn_before: Turn, action: Action, turn_after: Turn) -> int | None:
+    """Best-effort recovery of the real value `action` revealed, purely from
+    public `Turn` fields `turn_after` already exposes - never anything a
+    cache-reusing caller wasn't already entitled to see. Returns None
+    whenever it can't be recovered with confidence (e.g. an immediate
+    column-clear already wiped the very position that would have shown it)
+    - a safe answer `advance_cached_root` treats exactly like any other
+    cache miss.
+    """
+    if action.type is ActionType.DRAW_STOCK:
+        # Still the same acting player's turn (awaiting_placement next), and
+        # a drawn card sits in `drawn_card` until it's placed or discarded.
+        return turn_after.drawn_card
+    if action.position is None:
+        return None
+    card = turn_after.boards[turn_before.acting_player].cards[action.position]
+    return card.value if card is not None and card.face_up else None
+
+
+def advance_cached_root(
+    cached_root: MCTSNode | None, turn_before: Turn, action: Action, turn_after: Turn
+) -> MCTSNode | None:
+    """Advances a previously-searched tree by one real transition - `action`,
+    taken by whichever seat `turn_before.acting_player` was - to whatever
+    subtree already covers the resulting position, or None if nothing
+    safely does.
+
+    Shared by `bots.mcts_bot.MctsBot.observe_transition` (a live bot
+    tracking its own cache across a real match) and
+    `evaluator._play_one_eval_game` (the same idea for a `HeuristicBot`
+    opponent's moves during evaluation) - both need the identical safe
+    tree-walk, just from different callers, neither of which should
+    duplicate it.
+
+    Every branch either finds the exact already-visited child that `action`
+    (and, for a reveal, its real resolved value) leads to, or returns None -
+    there's no partial/uncertain middle ground, since an incorrect reuse
+    would corrupt the search silently while a missed one only costs some
+    redundant computation next time.
+    """
+    if cached_root is None:
+        return None
+    state = cached_root.state
+    if gamestate_from_turn(turn_before) != state:
+        return None
+
+    representative = group_representatives(turn_before).get(action, action)
+    edge = cached_root.edges.get(representative)
+    if edge is None or edge.child is None or will_close_round(state, action):
+        # Round-closing is never cached on its edge in the first place (see
+        # this module's docstring) - nothing to carry forward.
+        return None
+
+    if is_reveal(state, action):
+        chance = edge.child
+        revealed_value = infer_revealed_value(turn_before, action, turn_after)
+        chance_edge = (
+            chance.edges.get(revealed_value)
+            if isinstance(chance, ChanceNode) and revealed_value is not None
+            else None
+        )
+        child = chance_edge.child if chance_edge is not None else None
+    else:
+        child = edge.child if isinstance(edge.child, MCTSNode) else None
+
+    return child if isinstance(child, MCTSNode) and not child.is_terminal else None

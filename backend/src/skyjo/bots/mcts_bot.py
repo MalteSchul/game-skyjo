@@ -25,13 +25,19 @@ import os
 import numpy as np
 
 from skyjo.bots.base import ProgressReporter
-from skyjo.domain.action_equivalence import group_representatives
-from skyjo.domain.engine import Action, ActionType
+from skyjo.domain.engine import Action
 from skyjo.domain.observation import Turn
 from skyjo.rl.checkpoint import load_checkpoint
 from skyjo.rl.evaluator import make_network_evaluator
-from skyjo.rl.hidden_info import gamestate_from_turn, is_reveal, will_close_round
-from skyjo.rl.mcts import DEFAULT_C_PUCT, ChanceNode, EvaluateFn, MCTSNode, greedy_action, run_mcts
+from skyjo.rl.hidden_info import gamestate_from_turn
+from skyjo.rl.mcts import (
+    DEFAULT_C_PUCT,
+    EvaluateFn,
+    MCTSNode,
+    advance_cached_root,
+    greedy_action,
+    run_mcts,
+)
 from skyjo.rl.network import AlphaZeroNet
 
 # If set, default_evaluator() loads this checkpoint (the format
@@ -125,63 +131,12 @@ class MctsBot:
         return best_action
 
     def observe_transition(self, turn_before: Turn, action: Action, turn_after: Turn) -> None:
-        """Advances `self._cached_root` by one real transition - `action`,
-        taken by whichever seat `turn_before.acting_player` was - so the
-        cache reflects the match's actual path rather than just this bot's
-        own last search. See `ObservesActions`: called for *every* seat's
-        action, not just this bot's own turns, since another player's move
-        (or a chance reveal it triggers) advances the position this bot will
-        next be asked to search from just the same.
-
-        Every branch below either finds the exact already-visited child that
-        `action` (and, for a reveal, its real resolved value) leads to, or
-        clears the cache - there's no partial/uncertain middle ground, since
-        an incorrect reuse would corrupt the search silently while a missed
-        one only costs some redundant computation next time.
+        """Advances `self._cached_root` by one real transition - see
+        `rl.mcts.advance_cached_root`, which does the actual tree-walk this
+        just delegates to (shared with `evaluator._play_one_eval_game`'s own
+        reuse). See `ObservesActions`: called for *every* seat's action, not
+        just this bot's own turns, since another player's move (or a chance
+        reveal it triggers) advances the position this bot will next be
+        asked to search from just the same.
         """
-        if self._cached_root is None:
-            return
-        state = self._cached_root.state
-        if gamestate_from_turn(turn_before) != state:
-            self._cached_root = None
-            return
-
-        representative = group_representatives(turn_before).get(action, action)
-        edge = self._cached_root.edges.get(representative)
-        if edge is None or edge.child is None or will_close_round(state, action):
-            # Round-closing is never cached on its edge in the first place
-            # (see rl.mcts's module docstring) - nothing to carry forward.
-            self._cached_root = None
-            return
-
-        if is_reveal(state, action):
-            chance = edge.child
-            revealed_value = _infer_revealed_value(turn_before, action, turn_after)
-            chance_edge = (
-                chance.edges.get(revealed_value)
-                if isinstance(chance, ChanceNode) and revealed_value is not None
-                else None
-            )
-            child = chance_edge.child if chance_edge is not None else None
-        else:
-            child = edge.child if isinstance(edge.child, MCTSNode) else None
-
-        self._cached_root = child if isinstance(child, MCTSNode) and not child.is_terminal else None
-
-
-def _infer_revealed_value(turn_before: Turn, action: Action, turn_after: Turn) -> int | None:
-    """Best-effort recovery of the real value `action` revealed, purely from
-    public `Turn` fields turn_after already exposes - never anything this
-    bot wasn't already entitled to see. Returns None whenever it can't be
-    recovered with confidence (e.g. an immediate column-clear already wiped
-    the very position that would have shown it) - always a safe answer, that
-    `observe_transition` treats exactly like any other cache miss.
-    """
-    if action.type is ActionType.DRAW_STOCK:
-        # Still the same acting player's turn (awaiting_placement next), and
-        # a drawn card sits in `drawn_card` until it's placed or discarded.
-        return turn_after.drawn_card
-    if action.position is None:
-        return None
-    card = turn_after.boards[turn_before.acting_player].cards[action.position]
-    return card.value if card is not None and card.face_up else None
+        self._cached_root = advance_cached_root(self._cached_root, turn_before, action, turn_after)

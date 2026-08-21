@@ -11,6 +11,7 @@ from skyjo.rl.evaluator import (
     make_batch_network_evaluator,
     make_network_evaluator,
 )
+from skyjo.rl.mcts import DEFAULT_C_PUCT
 from skyjo.rl.network import AlphaZeroNet
 
 # --- fixture helpers -----------------------------------------------------------
@@ -225,6 +226,41 @@ def test_evaluate_vs_heuristic_is_deterministic_for_the_same_seed_and_weights():
     second = evaluate_vs_heuristic(net, 3, num_simulations=2, max_steps=2000, seed=5)
 
     assert first == second
+
+
+def test_play_one_eval_game_caps_each_net_decision_at_the_requested_total_visits(monkeypatch):
+    # _play_one_eval_game reuses its search tree across the net's own turns
+    # (see its docstring), which means a later decision's cached_root can
+    # already carry visits from an earlier one. num_simulations must stay a
+    # *target total* per decision in that case - the actual run_mcts call
+    # should ask for fewer new simulations accordingly, never letting a
+    # decision end up backed by more total visits than a from-scratch
+    # search would've given it.
+    import skyjo.rl.evaluator as evaluator_module
+
+    real_run_mcts = evaluator_module.run_mcts
+    seen_num_simulations: list[int] = []
+
+    def spying_run_mcts(*args, **kwargs):
+        seen_num_simulations.append(kwargs["num_simulations"])
+        return real_run_mcts(*args, **kwargs)
+
+    monkeypatch.setattr(evaluator_module, "run_mcts", spying_run_mcts)
+
+    _play_one_eval_game(
+        make_network_evaluator(_tiny_net()),
+        net_seat=0,
+        seed=1,
+        num_simulations=5,
+        c_puct=DEFAULT_C_PUCT,
+        max_steps=2000,
+    )
+
+    assert all(n <= 5 for n in seen_num_simulations)
+    # Reuse must have actually kicked in for at least one later decision,
+    # shrinking the request below the full budget - otherwise this test
+    # isn't exercising the new behavior at all.
+    assert any(n < 5 for n in seen_num_simulations)
 
 
 def test_evaluate_vs_heuristic_supports_zero_simulations():
