@@ -74,13 +74,13 @@ class TrainingConfig:
     # random tie-break (see bots/mcts_bot.py), but self-play here samples
     # from `visit_distribution` instead, so a small residual randomness is
     # what keeps a game from looping on the same tied action pair forever.
-    tau: float = 1.0
+    tau: float = 0.3
     c_puct: float = DEFAULT_C_PUCT
     dirichlet_alpha: float = DEFAULT_DIRICHLET_ALPHA
     dirichlet_epsilon: float = DEFAULT_DIRICHLET_EPSILON
     buffer_capacity: int = 200_000
     batch_size: int = 256
-    train_steps_per_iteration: int = 100
+    train_steps_per_iteration: int = 200
     min_buffer_size: int | None = None  # None = require at least one full batch (batch_size)
     lr: float = 1e-3
     lambda_rank: float = DEFAULT_LAMBDA_RANK

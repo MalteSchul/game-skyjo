@@ -310,6 +310,10 @@ def test_observe_transition_clears_the_cache_for_a_round_closing_action():
 
 
 def test_choose_action_reuses_the_cached_tree_after_a_matching_observe_transition():
+    # num_simulations is a *target total* per decision, not "always this many
+    # more": the reused child already carries some visits from the parent's
+    # own 10-simulation search, so the second choose_action should only need
+    # to run the shortfall to reach 10 total, not add another 10 on top.
     state = _awaiting_draw_state(seed=1)
     turn_before = Turn.from_state(state)
     action = Action(type=ActionType.DRAW_DISCARD)
@@ -318,6 +322,7 @@ def test_choose_action_reuses_the_cached_tree_after_a_matching_observe_transitio
     bot.choose_action(turn_before)
     edge = bot._cached_root.edges[action]
     expected_prior_visits = edge.child.visit_count
+    assert expected_prior_visits < 10  # sanity: a genuine shortfall exists to fill
 
     turn_after = Turn.from_state(apply_action(state, action))
     bot.observe_transition(turn_before, action, turn_after)
@@ -325,7 +330,49 @@ def test_choose_action_reuses_the_cached_tree_after_a_matching_observe_transitio
 
     bot.choose_action(turn_after)
 
-    assert bot._cached_root.visit_count == expected_prior_visits + 10
+    assert bot._cached_root.visit_count == 10
+
+
+def test_choose_action_progress_reflects_visits_already_carried_over_on_reuse():
+    state = _awaiting_draw_state(seed=1)
+    turn_before = Turn.from_state(state)
+    action = Action(type=ActionType.DRAW_DISCARD)
+    bot = MctsBot(_uniform_evaluate, num_simulations=10, seed=1)
+    bot.choose_action(turn_before)
+    already_visited = bot._cached_root.edges[action].child.visit_count
+    assert already_visited < 10  # sanity: a genuine shortfall exists to fill
+
+    turn_after = Turn.from_state(apply_action(state, action))
+    bot.observe_transition(turn_before, action, turn_after)
+    progress_calls: list[float] = []
+
+    bot.choose_action(turn_after, report_progress=progress_calls.append)
+
+    # Progress should account for the visits already carried over, not
+    # restart from 1/10 as if nothing had been reused.
+    assert len(progress_calls) == 10 - already_visited
+    assert progress_calls[0] == pytest.approx((already_visited + 1) / 10)
+    assert progress_calls[-1] == 1.0
+
+
+def test_choose_action_runs_zero_new_simulations_when_the_reused_root_already_meets_the_target():
+    turn = Turn.from_state(_awaiting_draw_state(seed=1))
+    cached_state = gamestate_from_turn(turn)
+    action = turn.legal_actions[0]
+    root = MCTSNode(state=cached_state, n_act=2, is_terminal=False)
+    root.edges[action] = MCTSEdge(
+        action=action, prior=1.0, n_act=2, visit_count=50, child=MCTSNode(state=cached_state, n_act=2, is_terminal=False)
+    )
+    bot = MctsBot(_uniform_evaluate, num_simulations=5, seed=1)  # target well below the 50 already cached
+    bot._cached_root = root
+    progress_calls: list[float] = []
+
+    result_action = bot.choose_action(turn, report_progress=progress_calls.append)
+
+    assert bot._cached_root is root  # unchanged: run_mcts(num_simulations=0) returns it as-is
+    assert bot._cached_root.visit_count == 50  # no new simulations were added
+    assert progress_calls == [1.0]
+    assert result_action in turn.legal_actions
 
 
 # --- integration: many consecutive turns, alternating seats -------------------

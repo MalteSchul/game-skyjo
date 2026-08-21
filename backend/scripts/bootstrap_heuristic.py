@@ -41,11 +41,15 @@ import time
 import numpy as np
 import torch
 
-from skyjo.rl.bootstrap import generate_heuristic_dataset, load_replay_samples, save_replay_samples
+from skyjo.rl.bootstrap import (
+    generate_heuristic_dataset,
+    load_replay_samples,
+    save_replay_samples,
+    subsample_replay_samples,
+)
 from skyjo.rl.checkpoint import save_checkpoint
 from skyjo.rl.metrics import MetricsLogger
 from skyjo.rl.network import AlphaZeroNet
-from skyjo.rl.replay_buffer import ReplayBuffer
 from skyjo.rl.selfplay import DEFAULT_MAX_STEPS, ReplaySample
 from skyjo.rl.train import collate_batch, training_step
 
@@ -89,6 +93,16 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="stop right after generating/loading (and, if --samples-out is set, saving) the dataset - "
         "for when this script is only being used to produce a dataset, not a checkpoint.",
+    )
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=500_000,
+        help="cap on samples held in memory for training, applied by randomly subsampling right after "
+        "generating/loading (--samples-out, if set, still saves the full un-subsampled set). A dataset "
+        "worth caching for reuse across experiments (e.g. --games 10000, 3M+ samples) is usually far "
+        "bigger than any one bootstrap run needs resident at once - default sized for an 8GB machine, "
+        "raise it if you have the RAM to spare.",
     )
     return parser.parse_args()
 
@@ -170,19 +184,28 @@ def main() -> None:
     if args.skip_training:
         return
 
+    rng = np.random.default_rng(args.seed)
+    if len(samples) > args.max_samples:
+        before = len(samples)
+        samples = subsample_replay_samples(samples, args.max_samples, rng)
+        print(f"subsampled {before} -> {len(samples)} samples (--max-samples={args.max_samples})")
+
     if len(samples) < args.batch_size:
         raise SystemExit(f"only {len(samples)} samples generated, need at least --batch-size={args.batch_size}")
 
-    buffer = ReplayBuffer(capacity=len(samples))
-    buffer.add_episode(samples)
-
     net = AlphaZeroNet(**network_kwargs)
     optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
-    rng = np.random.default_rng(args.seed)
 
+    # Sampling directly from `samples` rather than through a `ReplayBuffer`: that class's
+    # `add()` eagerly encodes and caches every sample up front, which only pays off when a
+    # sample gets redrawn many times over its buffer lifetime (the self-play loop's case).
+    # Here `collate_batch` re-encodes on every draw anyway (no encodings passed in), so an
+    # eager cache sized to the whole dataset would just be wasted memory - at 3M+ samples,
+    # multiple GB of it.
     with MetricsLogger(args.log_dir) as metrics:
         for step in range(args.train_steps):
-            batch = collate_batch(buffer.sample_batch(args.batch_size, rng))
+            indices = rng.choice(len(samples), size=args.batch_size, replace=False)
+            batch = collate_batch([samples[i] for i in indices])
             step_metrics = training_step(net, optimizer, batch, lambda_rank=args.lambda_rank, l2_coef=args.l2_coef)
             if step % args.log_every == 0 or step == args.train_steps - 1:
                 metrics.log(step, step_metrics, prefix="train/")

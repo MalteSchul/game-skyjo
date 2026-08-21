@@ -96,29 +96,35 @@ class MctsBot:
         # that walk (a rewound history, a chance outcome never visited, a
         # round transition), this is simply None and search falls back to
         # today's from-scratch behavior. Never causes a wrong answer, only
-        # sometimes misses the chance to reuse work.
+        # sometimes misses the chance to reuse work. `num_simulations` is a
+        # *target total* per decision, not "always this many more" (see
+        # `choose_action`) - reuse's actual payoff for a live bot is lower
+        # latency (fewer new simulations needed to reach that target), not
+        # just a stronger search at the same cost.
         self._cached_root: MCTSNode | None = None
 
     def choose_action(self, turn: Turn, *, report_progress: ProgressReporter | None = None) -> Action:
-        def on_simulation(step: int) -> None:
-            if report_progress is not None:
-                report_progress(step / self._num_simulations)
-
         reuse_root = self._cached_root
         if reuse_root is not None and reuse_root.state != gamestate_from_turn(turn):
             reuse_root = None
+        already_visited = reuse_root.visit_count if reuse_root is not None else 0
+        remaining = max(0, self._num_simulations - already_visited)
+
+        def on_simulation(step: int) -> None:
+            if report_progress is not None:
+                report_progress((already_visited + step) / self._num_simulations)
 
         root = run_mcts(
             turn,
             self._evaluate,
-            num_simulations=self._num_simulations,
+            num_simulations=remaining,
             c_puct=self._c_puct,
             # Root noise exists to diversify self-play training data - a live
             # bot should always search its true best line, not an
             # artificially perturbed one.
             add_root_noise=False,
             rng=self._rng,
-            on_simulation=on_simulation if self._num_simulations > 0 else None,
+            on_simulation=on_simulation if remaining > 0 else None,
             reuse_root=reuse_root,
         )
         # Most-visited (strongest) action, not a tau-sampled one - see
@@ -126,7 +132,7 @@ class MctsBot:
         best_action = greedy_action(root, self._rng)
         self._cached_root = root
 
-        if report_progress is not None and self._num_simulations == 0:
+        if report_progress is not None and remaining == 0:
             report_progress(1.0)
         return best_action
 

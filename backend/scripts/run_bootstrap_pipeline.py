@@ -79,6 +79,12 @@ def _parse_args() -> argparse.Namespace:
     bootstrap.add_argument("--bootstrap-train-steps", type=int, default=5000)
     bootstrap.add_argument("--bootstrap-batch-size", type=int, default=256)
     bootstrap.add_argument("--bootstrap-lr", type=float, default=1e-3)
+    bootstrap.add_argument(
+        "--bootstrap-max-samples",
+        type=int,
+        default=500_000,
+        help="passed through to bootstrap_heuristic.py's --max-samples - see its help text",
+    )
 
     sanity = parser.add_argument_group("stage 3: sanity check")
     sanity.add_argument("--sanity-games", type=int, default=40)
@@ -89,7 +95,7 @@ def _parse_args() -> argparse.Namespace:
     selfplay.add_argument("--iterations", type=int, default=200)
     selfplay.add_argument("--games-per-iteration", type=int, default=32)
     selfplay.add_argument("--num-simulations", type=int, default=200)
-    selfplay.add_argument("--tau", type=float, default=1.0, help="fixed tau for every self-play decision, no annealing")
+    selfplay.add_argument("--tau", type=float, default=0.3, help="fixed tau for every self-play decision, no annealing")
     selfplay.add_argument(
         "--round-max-steps",
         type=int,
@@ -174,6 +180,8 @@ def _run_bootstrap_stage(args: argparse.Namespace, dataset_path: Path, checkpoin
             str(checkpoint_path),
             "--log-dir",
             str(log_dir),
+            "--max-samples",
+            str(args.bootstrap_max_samples),
         ]
     )
 

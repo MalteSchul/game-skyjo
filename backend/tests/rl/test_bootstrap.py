@@ -1,7 +1,13 @@
+import numpy as np
 import pytest
 
 import skyjo.rl.bootstrap as bootstrap_module
-from skyjo.rl.bootstrap import generate_heuristic_dataset, load_replay_samples, save_replay_samples
+from skyjo.rl.bootstrap import (
+    generate_heuristic_dataset,
+    load_replay_samples,
+    save_replay_samples,
+    subsample_replay_samples,
+)
 
 # --- happy path ------------------------------------------------------------
 
@@ -161,3 +167,32 @@ def test_save_replay_samples_rejects_an_empty_list(tmp_path):
 def test_load_replay_samples_rejects_a_missing_file(tmp_path):
     with pytest.raises(FileNotFoundError):
         load_replay_samples(tmp_path / "does_not_exist.pkl")
+
+
+# --- subsample_replay_samples ------------------------------------------------
+
+
+def test_subsample_replay_samples_reduces_to_max_samples():
+    samples, _ = generate_heuristic_dataset(10, min_players=2, max_players=2, workers=0, seed=0)
+    rng = np.random.default_rng(0)
+
+    subsampled = subsample_replay_samples(samples, 3, rng)
+
+    assert len(subsampled) == 3
+    assert all(s in samples for s in subsampled)
+
+
+def test_subsample_replay_samples_is_a_no_op_when_already_at_or_under_the_cap():
+    samples, _ = generate_heuristic_dataset(3, min_players=2, max_players=2, workers=0, seed=0)
+    rng = np.random.default_rng(0)
+
+    assert subsample_replay_samples(samples, len(samples), rng) == samples
+    assert subsample_replay_samples(samples, len(samples) + 1, rng) == samples
+
+
+def test_subsample_replay_samples_rejects_a_non_positive_max_samples():
+    samples, _ = generate_heuristic_dataset(2, min_players=2, max_players=2, workers=0, seed=0)
+    rng = np.random.default_rng(0)
+
+    with pytest.raises(ValueError):
+        subsample_replay_samples(samples, 0, rng)

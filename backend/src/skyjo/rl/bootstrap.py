@@ -132,3 +132,22 @@ def load_replay_samples(path: str | Path) -> list[ReplaySample]:
     if not samples:
         raise ValueError(f"load_replay_samples: {path} contains no samples")
     return samples
+
+
+def subsample_replay_samples(
+    samples: Sequence[ReplaySample], max_samples: int, rng: np.random.Generator
+) -> list[ReplaySample]:
+    """Randomly subsamples down to `max_samples`, or returns `samples`
+    unchanged if it's already at or below that count - see
+    `scripts/bootstrap_heuristic.py`'s `--max-samples`: a dataset generated
+    (or loaded) for reuse across experiments can be far larger than any one
+    bootstrap training run needs resident in memory at once, since a training
+    run of `train_steps * batch_size` draws rarely needs the full set to be
+    statistically well-covered.
+    """
+    if max_samples <= 0:
+        raise ValueError("subsample_replay_samples: max_samples must be > 0")
+    if len(samples) <= max_samples:
+        return list(samples)
+    indices = rng.choice(len(samples), size=max_samples, replace=False)
+    return [samples[i] for i in indices]
