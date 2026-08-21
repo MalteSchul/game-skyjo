@@ -9,18 +9,22 @@ padded slot from a genuinely empty one.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
 
+from skyjo.domain.action_equivalence import distinct_actions
 from skyjo.domain.deck import DECK_SIZE
 from skyjo.domain.engine import (
     BOARD_SIZE,
     DEFAULT_TARGET_SCORE,
     MAX_PLAYERS,
     MIN_PLAYERS,
+    Action,
     GameState,
 )
+from skyjo.domain.observation import Turn
 from skyjo.rl.action_space import ACTION_SPACE_SIZE, legal_action_mask
 
 N_MAX_PLAYERS = MAX_PLAYERS  # 8, matches the rank head's 8x8 shape
@@ -70,10 +74,25 @@ class StateEncoding:
     active_count: int  # N_act
 
 
-def encode_state(state: GameState) -> StateEncoding:
+def encode_state(state: GameState, *, legal_actions: Sequence[Action] | None = None) -> StateEncoding:
+    """`legal_actions`, if given, is exactly the set of actions the mask
+    should mark True and the policy head should normalize over - callers
+    that already have it (an MCTS leaf's collapsed `distinct_actions`, see
+    `evaluator.make_network_evaluator`) skip re-deriving it here. Omitted,
+    it defaults to this state's own `distinct_actions(Turn.from_state(state))`
+    - the *collapsed* representative set, not the full raw `legal_actions`
+    list - so the network's policy head is never asked to spread probability
+    mass (or learn a target of zero) across actions that are provably
+    identical right now: see `domain.action_equivalence`. Every caller keeps
+    working unchanged, since this was already true of `Turn.from_state`
+    (raises IllegalActionError with no legal actions, i.e. round_over/
+    game_over - never encoded anyway).
+    """
     n_act = len(state.boards)
     if not (MIN_PLAYERS <= n_act <= MAX_PLAYERS):
         raise ValueError(f"encode_state: player_count {n_act} outside [{MIN_PLAYERS}, {MAX_PLAYERS}]")
+    if legal_actions is None:
+        legal_actions = distinct_actions(Turn.from_state(state))
 
     board_block = np.zeros((N_MAX_PLAYERS, _BOARD_FEATURES), dtype=np.float32)
     for player, board in enumerate(state.boards):
@@ -86,7 +105,7 @@ def encode_state(state: GameState) -> StateEncoding:
             slot[position, 2] = _normalize_value(card.value) if card.face_up else _ABSENT_VALUE
         board_block[player] = slot.reshape(-1)
 
-    mask = legal_action_mask(state)
+    mask = legal_action_mask(state, actions=legal_actions)
 
     global_features: list[float] = []
     discard_top = state.discard[-1] if state.discard else None

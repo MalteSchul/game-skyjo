@@ -8,6 +8,8 @@ state produced the legal-action list.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 
 from skyjo.domain.engine import BOARD_SIZE, Action, ActionType, GameState, legal_actions
@@ -52,10 +54,16 @@ def index_to_action(index: int) -> Action:
     raise AssertionError(f"index_to_action: {index} not covered by any action type - offsets out of sync")
 
 
-def legal_action_mask(state: GameState) -> np.ndarray:
-    """Boolean mask of shape (ACTION_SPACE_SIZE,), True at legal indices."""
+def legal_action_mask(state: GameState, *, actions: Sequence[Action] | None = None) -> np.ndarray:
+    """Boolean mask of shape (ACTION_SPACE_SIZE,), True at legal indices.
+
+    `actions`, if given, must be exactly `legal_actions(state)` for this same
+    `state` - e.g. a `Turn.legal_actions` a caller already computed for other
+    reasons - so this skips recomputing that list here. Recomputed when
+    omitted, so every existing caller keeps working unchanged.
+    """
     mask = np.zeros(ACTION_SPACE_SIZE, dtype=bool)
-    for action in legal_actions(state):
+    for action in actions if actions is not None else legal_actions(state):
         mask[action_to_index(action)] = True
     return mask
 

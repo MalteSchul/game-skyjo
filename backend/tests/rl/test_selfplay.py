@@ -6,6 +6,7 @@ import pytest
 from skyjo.bots.heuristic_bot import HeuristicBot
 from skyjo.domain.engine import ActionType, new_match
 from skyjo.domain.engine import legal_actions as engine_legal_actions
+from skyjo.domain.observation import Turn
 from skyjo.rl.action_space import ACTION_SPACE_SIZE, action_to_index
 from skyjo.rl.selfplay import generate_bot_episode, generate_episode, generate_episodes_batch
 
@@ -83,6 +84,31 @@ def test_generate_episode_accepts_a_callable_tau_schedule():
     # (which don't call tau_schedule), so calls is increasing but not contiguous.
     assert len(calls) == len(samples)
     assert calls == sorted(set(calls))
+
+
+def test_generate_episode_widens_a_tied_representative_to_a_uniformly_sampled_real_position():
+    # The very first decision (fully-unrevealed board) is one tied class
+    # spanning all 12 positions, so search only ever scores a single fixed
+    # representative for it - the recorded pi should point at that same
+    # representative regardless of seed. The position actually flipped on
+    # the real board should still vary across seeds, though: tied_actions
+    # widens the applied action back out across the whole class instead of
+    # always taking that same representative verbatim.
+    first_decision_argmax = set()
+    revealed_positions = set()
+    for seed in range(40):
+        state = new_match(player_count=2, seed=1)
+        turn = Turn.from_state(state)
+        samples = generate_episode(
+            state, _uniform_evaluate, num_simulations=1, rng=np.random.default_rng(seed), max_steps=3000
+        )
+        first_decision_argmax.add(int(np.argmax(samples[0].pi)))
+        after_board = samples[1].state.boards[turn.acting_player]
+        flipped = next(i for i, c in enumerate(after_board.cards) if c is not None and c.face_up)
+        revealed_positions.add(flipped)
+
+    assert len(first_decision_argmax) == 1
+    assert len(revealed_positions) > 1
 
 
 # --- bad path ------------------------------------------------------------
@@ -205,6 +231,24 @@ def test_generate_episodes_batch_handles_games_finishing_at_different_times():
     assert len(results[1]) > 0
     assert sorted(results[0][-1].y.tolist()) == [0, 1]
     assert sorted(results[1][-1].y.tolist()) == [0, 1, 2, 3]
+
+
+def test_generate_episodes_batch_widens_a_tied_representative_to_a_uniformly_sampled_real_position():
+    # Same property as generate_episode's own version of this test - the
+    # batched path must widen ties in its applied action too, not just when
+    # played solo.
+    revealed_positions = set()
+    for seed in range(40):
+        state = new_match(player_count=2, seed=1)
+        turn = Turn.from_state(state)
+        results = generate_episodes_batch(
+            [state], _batch_evaluate, num_simulations=1, rngs=[np.random.default_rng(seed)], max_steps=3000
+        )
+        after_board = results[0][1].state.boards[turn.acting_player]
+        flipped = next(i for i, c in enumerate(after_board.cards) if c is not None and c.face_up)
+        revealed_positions.add(flipped)
+
+    assert len(revealed_positions) > 1
 
 
 def test_generate_episodes_batch_with_no_games_returns_an_empty_list():

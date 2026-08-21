@@ -20,8 +20,9 @@ from dataclasses import dataclass
 from typing import Literal
 from uuid import uuid4
 
-from skyjo.bots.base import Bot
+from skyjo.bots.base import Bot, ObservesActions
 from skyjo.domain.engine import Action, GameState
+from skyjo.domain.observation import Turn
 
 
 class MatchNotFoundError(Exception):
@@ -226,8 +227,29 @@ class MatchStore:
     def _advance(
         self, tree: _MatchTree, edge: Edge, compute_state
     ) -> tuple[MatchNode, tuple[str, ...], tuple[str, ...]]:
+        parent = tree.head()
         node = tree.advance(edge, compute_state)
+        # Only a real action, landing on a non-terminal state, is a transition
+        # any bot's cached search state could meaningfully advance through -
+        # a next_round edge carries nothing (a fresh round is an independent
+        # shuffle) and a round/game-ending state has no Turn to build at all.
+        if edge.kind == "action" and node.state.phase not in ("round_over", "game_over"):
+            assert edge.action is not None
+            self._notify_bots(tree, parent.state, edge.action, node.state)
         return node, tree.player_names, tree.player_types
+
+    def _notify_bots(
+        self, tree: _MatchTree, state_before: GameState, action: Action, state_after: GameState
+    ) -> None:
+        """Tells every seat's bot - not just whoever acted - that `action`
+        was just taken, so a bot keeping state across turns (`MctsBot`'s
+        cached search tree) can advance it to match the match's real path.
+        See `ObservesActions`."""
+        turn_before = Turn.from_state(state_before)
+        turn_after = Turn.from_state(state_after)
+        for bot in tree.bots:
+            if isinstance(bot, ObservesActions):
+                bot.observe_transition(turn_before, action, turn_after)
 
     def _require_idle(self, tree: _MatchTree) -> None:
         if tree.autoplay_status.status == "thinking":

@@ -19,6 +19,7 @@ from skyjo.rl.mcts import (
     ChanceNode,
     MCTSEdge,
     MCTSNode,
+    _accepts_keyword,
     _select_edge,
     _terminal_utility,
     greedy_action,
@@ -507,6 +508,149 @@ def test_run_mcts_batch_rejects_mismatched_rngs_length():
 
     with pytest.raises(ValueError):
         run_mcts_batch([turn, turn], _batch_evaluate, num_simulations=5, rngs=[np.random.default_rng(0)])
+
+
+# --- _accepts_keyword: detects an evaluator's optional turn(s) fast path -------
+
+
+def test_accepts_keyword_true_for_an_explicit_keyword_only_param():
+    def evaluate(state, *, turn=None):
+        return None
+
+    assert _accepts_keyword(evaluate, "turn") is True
+
+
+def test_accepts_keyword_true_for_a_function_accepting_arbitrary_kwargs():
+    def evaluate(state, **kwargs):
+        return None
+
+    assert _accepts_keyword(evaluate, "turn") is True
+
+
+def test_accepts_keyword_false_for_a_function_without_that_param():
+    def evaluate(state):
+        return None
+
+    assert _accepts_keyword(evaluate, "turn") is False
+
+
+# --- turn-aware evaluators: the legal_actions dedup fast path -------------------
+
+
+def test_run_mcts_passes_each_leafs_own_turn_to_an_evaluator_that_accepts_it():
+    state = new_match(player_count=2, seed=1)
+    seen: list[tuple] = []
+
+    def recording_evaluate(state, *, turn=None):
+        seen.append((state, turn))
+        return _uniform_evaluate(state)
+
+    run_mcts(Turn.from_state(state), recording_evaluate, num_simulations=10, rng=np.random.default_rng(0))
+
+    assert seen  # at least the root was evaluated
+    for seen_state, turn in seen:
+        assert turn is not None
+        assert turn.legal_actions == Turn.from_state(seen_state).legal_actions
+
+
+def test_run_mcts_search_is_identical_whether_or_not_the_evaluator_is_turn_aware():
+    state = new_match(player_count=2, seed=1)
+    turn = Turn.from_state(state)
+
+    def turn_aware_evaluate(state, *, turn=None):
+        return _uniform_evaluate(state)
+
+    blind_root = run_mcts(turn, _uniform_evaluate, num_simulations=20, rng=np.random.default_rng(0))
+    aware_root = run_mcts(turn, turn_aware_evaluate, num_simulations=20, rng=np.random.default_rng(0))
+
+    assert {a: e.visit_count for a, e in blind_root.edges.items()} == {
+        a: e.visit_count for a, e in aware_root.edges.items()
+    }
+
+
+def test_run_mcts_batch_passes_each_leafs_own_turn_to_an_evaluator_that_accepts_it():
+    turn = Turn.from_state(new_match(player_count=2, seed=1))
+    seen: list[tuple] = []
+
+    def recording_evaluate_batch(states, *, turns=None):
+        assert turns is not None
+        seen.extend(zip(states, turns, strict=True))
+        return _batch_evaluate(states)
+
+    run_mcts_batch([turn], recording_evaluate_batch, num_simulations=10, rngs=[np.random.default_rng(0)])
+
+    assert seen
+    for seen_state, seen_turn in seen:
+        assert seen_turn.legal_actions == Turn.from_state(seen_state).legal_actions
+
+
+def test_run_mcts_batch_search_is_identical_whether_or_not_the_evaluator_is_turn_aware():
+    turn = Turn.from_state(new_match(player_count=2, seed=1))
+
+    def turn_aware_batch_evaluate(states, *, turns=None):
+        return _batch_evaluate(states)
+
+    [blind_root] = run_mcts_batch(
+        [turn], _batch_evaluate, num_simulations=20, rngs=[np.random.default_rng(0)]
+    )
+    [aware_root] = run_mcts_batch(
+        [turn], turn_aware_batch_evaluate, num_simulations=20, rngs=[np.random.default_rng(0)]
+    )
+
+    assert {a: e.visit_count for a, e in blind_root.edges.items()} == {
+        a: e.visit_count for a, e in aware_root.edges.items()
+    }
+
+
+# --- run_mcts: reuse_root ----------------------------------------------------
+
+
+def test_reuse_root_continues_accumulating_visits_on_top_of_the_existing_tree():
+    state = new_match(player_count=2, seed=1)
+    while state.phase == "initial_flip":
+        state = apply_action(state, engine_legal_actions(state)[0])
+    turn = Turn.from_state(state)
+
+    first_root = run_mcts(turn, _uniform_evaluate, num_simulations=10, rng=np.random.default_rng(0), add_root_noise=False)
+    assert first_root.visit_count == 10
+
+    reused_root = run_mcts(
+        turn, _uniform_evaluate, num_simulations=5, rng=np.random.default_rng(1), add_root_noise=False,
+        reuse_root=first_root,
+    )
+
+    assert reused_root is first_root
+    assert reused_root.visit_count == 15
+
+
+def test_reuse_root_produces_a_well_formed_tree_matching_a_longer_fresh_search_in_shape():
+    # Not bit-identical to a single 15-simulation run (rng is consumed in a
+    # different order across two calls than one), but reusing a 10-simulation
+    # root and adding 5 more must land on the exact same *total* - nothing
+    # lost, nothing double-counted.
+    state = new_match(player_count=2, seed=1)
+    while state.phase == "initial_flip":
+        state = apply_action(state, engine_legal_actions(state)[0])
+    turn = Turn.from_state(state)
+
+    root = run_mcts(turn, _uniform_evaluate, num_simulations=10, rng=np.random.default_rng(0), add_root_noise=False)
+    root = run_mcts(
+        turn, _uniform_evaluate, num_simulations=5, rng=np.random.default_rng(0), add_root_noise=False,
+        reuse_root=root,
+    )
+
+    assert root.visit_count == 15
+    assert sum(edge.visit_count for edge in root.edges.values()) == 15
+
+
+def test_reuse_root_rejects_a_root_whose_state_does_not_match_the_given_turn():
+    state_a = new_match(player_count=2, seed=1)
+    state_b = new_match(player_count=2, seed=2)
+    turn_a, turn_b = Turn.from_state(state_a), Turn.from_state(state_b)
+    root_a = run_mcts(turn_a, _uniform_evaluate, num_simulations=1, add_root_noise=False)
+
+    with pytest.raises(ValueError):
+        run_mcts(turn_b, _uniform_evaluate, num_simulations=1, reuse_root=root_a)
 
 
 # --- greedy_action -----------------------------------------------------------

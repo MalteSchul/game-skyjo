@@ -65,6 +65,23 @@ def test_legal_action_mask_is_all_false_at_round_over():
     assert not mask.any()
 
 
+def test_legal_action_mask_with_precomputed_actions_matches_recomputing_them():
+    state = new_match(player_count=3, seed=1)
+
+    recomputed = legal_action_mask(state)
+    precomputed = legal_action_mask(state, actions=engine_legal_actions(state))
+
+    assert np.array_equal(recomputed, precomputed)
+
+
+def test_legal_action_mask_actually_uses_the_precomputed_actions_not_just_ignoring_them():
+    state = new_match(player_count=3, seed=1)
+
+    mask = legal_action_mask(state, actions=[])
+
+    assert not mask.any()  # would be non-empty if the override were silently ignored
+
+
 def _play_until_round_over(state):
     import random
 

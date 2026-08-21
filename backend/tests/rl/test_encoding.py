@@ -3,6 +3,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
+from skyjo.domain.action_equivalence import distinct_actions
 from skyjo.domain.engine import (
     MAX_PLAYERS,
     MIN_PLAYERS,
@@ -12,6 +13,7 @@ from skyjo.domain.engine import (
     legal_actions,
     new_match,
 )
+from skyjo.domain.observation import Turn
 from skyjo.rl.action_space import ACTION_SPACE_SIZE
 from skyjo.rl.encoding import (
     _ABSENT_VALUE,
@@ -69,12 +71,50 @@ def test_board_features_for_players_beyond_active_count_are_zero_padded():
     assert np.any(board_block[0] != 0.0)  # sanity: real players actually produce features
 
 
-def test_legal_action_mask_matches_between_encoding_and_action_space_module():
+def test_encode_state_defaults_to_the_collapsed_representative_set_not_every_raw_legal_action():
+    # Fresh initial_flip: every FLIP_INITIAL position is provably equivalent
+    # (nothing revealed anywhere yet) - domain.action_equivalence collapses
+    # all of them onto one representative, and that's what the network's
+    # policy head should see, not all of the raw per-position actions.
+    state = new_match(player_count=4, seed=3)
+    turn = Turn.from_state(state)
+    assert len(turn.legal_actions) > 1  # sanity: there's real collapsing to observe
+
+    mask = encode_state(state).legal_action_mask
+
+    assert int(mask.sum()) == len(distinct_actions(turn))
+    assert int(mask.sum()) < len(turn.legal_actions)
+
+
+def test_encode_state_mask_matches_the_raw_legal_action_mask_when_nothing_can_collapse():
+    # awaiting_draw: DRAW_STOCK vs DRAW_DISCARD are never equivalent to each
+    # other, so collapsing is a no-op here - the two masks should agree exactly.
     from skyjo.rl.action_space import legal_action_mask
 
-    state = new_match(player_count=4, seed=3)
+    state = new_match(player_count=2, seed=1)
+    while state.phase == "initial_flip":
+        state = apply_action(state, legal_actions(state)[0])
 
     assert np.array_equal(encode_state(state).legal_action_mask, legal_action_mask(state))
+
+
+def test_encode_state_with_precomputed_legal_actions_matches_recomputing_them():
+    state = new_match(player_count=3, seed=1)
+    turn = Turn.from_state(state)
+
+    recomputed = encode_state(state)
+    precomputed = encode_state(state, legal_actions=distinct_actions(turn))
+
+    np.testing.assert_array_equal(precomputed.features, recomputed.features)
+    np.testing.assert_array_equal(precomputed.legal_action_mask, recomputed.legal_action_mask)
+
+
+def test_encode_state_actually_uses_the_precomputed_legal_actions_not_just_ignoring_them():
+    state = new_match(player_count=3, seed=1)
+
+    encoding = encode_state(state, legal_actions=[])
+
+    assert not encoding.legal_action_mask.any()  # would be non-empty if the override were ignored
 
 
 # --- bad path ------------------------------------------------------------------

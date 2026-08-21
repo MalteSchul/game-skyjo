@@ -1,5 +1,9 @@
 """Bridges `AlphaZeroNet` to MCTS's `EvaluateFn` signature: one `GameState`
-in, `(priors over legal actions, utility vector)` out.
+in, `(priors over the collapsed set of legal actions, utility vector)` out -
+see `domain.action_equivalence`: provably-equivalent actions (e.g. every
+FLIP_INITIAL position on a fresh board) share one representative, so the
+policy head never has to spread probability mass, or learn a target of zero,
+across options that can't currently differ.
 
 Also hosts `evaluate_vs_heuristic`, a diagnostic harness that plays a net
 against `HeuristicBot` and reports win rate/rank/points - the cheap "are we
@@ -23,6 +27,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from skyjo.domain.action_equivalence import distinct_actions
 from skyjo.domain.engine import (
     Action,
     GameState,
@@ -73,8 +78,10 @@ def make_network_evaluator(
     net.to(device)
     net.eval()
 
-    def evaluate(state: GameState) -> tuple[dict[Action, float], np.ndarray]:
-        encoding = encode_state(state)
+    def evaluate(
+        state: GameState, *, turn: Turn | None = None
+    ) -> tuple[dict[Action, float], np.ndarray]:
+        encoding = encode_state(state, legal_actions=None if turn is None else distinct_actions(turn))
         with torch.no_grad():
             features = torch.from_numpy(encoding.features).unsqueeze(0).to(device)
             mask = torch.from_numpy(encoding.legal_action_mask).unsqueeze(0).to(device)
@@ -111,11 +118,19 @@ def make_batch_network_evaluator(
     net.to(device)
     net.eval()
 
-    def evaluate_batch(states: Sequence[GameState]) -> list[LeafResult]:
+    def evaluate_batch(
+        states: Sequence[GameState], *, turns: Sequence[Turn] | None = None
+    ) -> list[LeafResult]:
         if not states:
             return []
 
-        encodings = [encode_state(state) for state in states]
+        if turns is None:
+            encodings = [encode_state(state) for state in states]
+        else:
+            encodings = [
+                encode_state(state, legal_actions=distinct_actions(turn))
+                for state, turn in zip(states, turns, strict=True)
+            ]
         with torch.no_grad():
             features = torch.from_numpy(np.stack([e.features for e in encodings])).to(device)
             mask = torch.from_numpy(np.stack([e.legal_action_mask for e in encodings])).to(device)

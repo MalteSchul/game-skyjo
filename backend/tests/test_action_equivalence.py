@@ -1,7 +1,7 @@
 from collections.abc import Sequence
 from dataclasses import replace
 
-from skyjo.domain.action_equivalence import distinct_actions, group_representatives
+from skyjo.domain.action_equivalence import distinct_actions, group_representatives, tied_actions
 from skyjo.domain.engine import (
     BOARD_SIZE,
     Action,
@@ -179,3 +179,49 @@ def test_group_representatives_groups_equivalent_hidden_slots_onto_the_same_repr
     place_2 = Action(ActionType.PLACE, position=2)
     place_3 = Action(ActionType.PLACE, position=3)
     assert mapping[place_2] == mapping[place_3]
+
+
+# --- tied_actions: widening a representative back out to its real class -----
+
+
+def test_tied_actions_returns_every_position_collapsed_onto_the_representative():
+    board0 = _board_from_values(list(range(12)))  # fully hidden, blank columns everywhere
+    board1 = _board_from_values(list(range(12)))
+    state = _state((board0, board1), drawn_card=7)
+    turn = Turn.from_state(state)
+
+    place_2 = Action(ActionType.PLACE, position=2)
+    place_3 = Action(ActionType.PLACE, position=3)
+    representative = group_representatives(turn)[place_2]
+
+    group = tied_actions(turn, representative)
+
+    assert place_2 in group
+    assert place_3 in group
+    assert representative in group
+
+
+def test_tied_actions_is_a_singleton_when_nothing_else_ties_with_it():
+    # 0 and 1 hold distinct known values (4 vs 11) - each is its own class,
+    # so widening either one back out should yield just itself.
+    board0 = _reveal(_board_from_values([4, 11, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9]), 0, 1)
+    board1 = _board_from_values(list(range(12)))
+    state = _state((board0, board1), drawn_card=7)
+    turn = Turn.from_state(state)
+
+    place_0 = Action(ActionType.PLACE, position=0)
+    assert tied_actions(turn, place_0) == (place_0,)
+
+
+def test_tied_actions_passes_a_position_less_action_through_as_a_singleton():
+    board0 = _board_from_values(list(range(12)))
+    board1 = _board_from_values(list(range(12)))
+    state = replace(
+        _state((board0, board1), drawn_card=0),
+        drawn_card=None,
+        phase="awaiting_draw",
+    )
+    turn = Turn.from_state(state)
+
+    draw_stock = Action(ActionType.DRAW_STOCK)
+    assert tied_actions(turn, draw_stock) == (draw_stock,)

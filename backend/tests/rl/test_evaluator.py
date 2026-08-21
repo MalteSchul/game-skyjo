@@ -1,7 +1,9 @@
 import numpy as np
 import pytest
 
+from skyjo.domain.action_equivalence import distinct_actions
 from skyjo.domain.engine import GameState, legal_actions, new_match
+from skyjo.domain.observation import Turn
 from skyjo.rl.encoding import N_MAX_PLAYERS
 from skyjo.rl.evaluator import (
     _play_one_eval_game,
@@ -21,14 +23,32 @@ def _tiny_net() -> AlphaZeroNet:
 # --- happy path -----------------------------------------------------------------
 
 
-def test_returns_priors_over_legal_actions_and_a_per_player_value():
+def test_returns_priors_over_the_collapsed_legal_actions_and_a_per_player_value():
+    # A fresh match's initial_flip: every raw FLIP_INITIAL position is
+    # provably equivalent, so the network's priors should span only the
+    # collapsed representative set - never the full raw legal-action list.
     state = new_match(player_count=3, seed=1)
     evaluate = make_network_evaluator(_tiny_net())
 
     priors, value = evaluate(state)
 
-    assert set(priors.keys()) == set(legal_actions(state))
+    assert set(priors.keys()) == set(distinct_actions(Turn.from_state(state)))
+    assert set(priors.keys()) < set(legal_actions(state))
     assert value.shape == (3,)
+
+
+def test_evaluate_with_a_precomputed_turn_matches_recomputing_it():
+    state = new_match(player_count=3, seed=1)
+    net = _tiny_net()
+    evaluate = make_network_evaluator(net)
+
+    recomputed_priors, recomputed_value = evaluate(state)
+    precomputed_priors, precomputed_value = evaluate(state, turn=Turn.from_state(state))
+
+    assert precomputed_priors.keys() == recomputed_priors.keys()
+    for action in precomputed_priors:
+        assert precomputed_priors[action] == pytest.approx(recomputed_priors[action])
+    np.testing.assert_allclose(precomputed_value, recomputed_value)
 
 
 def test_rank_probs_sink_is_untouched_when_not_given():
@@ -134,14 +154,28 @@ def test_batch_evaluator_returns_results_in_the_same_order_as_states():
         np.testing.assert_allclose(value, expected_value, atol=1e-5)
 
 
-def test_batch_evaluator_returns_priors_over_legal_actions_and_a_per_player_value():
+def test_batch_evaluator_returns_priors_over_the_collapsed_legal_actions_and_a_per_player_value():
     state = new_match(player_count=3, seed=1)
     batch_evaluate = make_batch_network_evaluator(_tiny_net())
 
     [(priors, value)] = batch_evaluate([state])
 
-    assert set(priors.keys()) == set(legal_actions(state))
+    assert set(priors.keys()) == set(distinct_actions(Turn.from_state(state)))
+    assert set(priors.keys()) < set(legal_actions(state))
     assert value.shape == (3,)
+
+
+def test_batch_evaluator_with_precomputed_turns_matches_recomputing_them():
+    net = _tiny_net()
+    states = [new_match(player_count=2, seed=1), new_match(player_count=3, seed=2)]
+    batch_evaluate = make_batch_network_evaluator(net)
+
+    recomputed = batch_evaluate(states)
+    precomputed = batch_evaluate(states, turns=[Turn.from_state(s) for s in states])
+
+    for (r_priors, r_value), (p_priors, p_value) in zip(recomputed, precomputed, strict=True):
+        assert p_priors.keys() == r_priors.keys()
+        np.testing.assert_allclose(p_value, r_value)
 
 
 # --- bad/edge path ---------------------------------------------------------------
@@ -151,6 +185,14 @@ def test_batch_evaluator_with_no_states_returns_an_empty_list_without_touching_t
     batch_evaluate = make_batch_network_evaluator(_tiny_net())
 
     assert batch_evaluate([]) == []
+
+
+def test_batch_evaluator_rejects_mismatched_turns_length():
+    states = [new_match(player_count=2, seed=1), new_match(player_count=2, seed=2)]
+    batch_evaluate = make_batch_network_evaluator(_tiny_net())
+
+    with pytest.raises(ValueError):
+        batch_evaluate(states, turns=[Turn.from_state(states[0])])
 
 
 def test_two_different_states_get_two_separate_sink_entries():

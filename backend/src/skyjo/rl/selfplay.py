@@ -3,6 +3,16 @@ at every decision and back-filling the true final ranks once it ends.
 
 `round_over` is passed through automatically (same non-decision transition
 `mcts._advance_state` uses), so no replay sample is ever recorded for it.
+
+The action actually applied to advance the real game is not always the
+`sample_action`-chosen representative verbatim: `domain.action_equivalence
+.tied_actions` widens it back out to its full equivalence class, and a
+member is picked uniformly at random - search still only ever explores one
+representative per class, but the *real* board layouts self-play produces
+for a tied decision aren't all canonicalized onto the same fixed position
+(e.g. always the lowest-index slot) the way they would be otherwise. The
+recorded `pi` target is unaffected either way; it's the tree's own visit
+distribution over representatives, exactly as before.
 """
 
 from __future__ import annotations
@@ -12,6 +22,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from skyjo.domain.action_equivalence import tied_actions
 from skyjo.domain.engine import Action, GameState, apply_action, force_close_round, start_next_round
 from skyjo.domain.observation import Turn
 from skyjo.rl.action_space import pi_to_vector
@@ -110,9 +121,10 @@ def generate_episode(
             round_step = 0
             continue
 
+        turn = Turn.from_state(state)
         tau = tau_schedule(step) if callable(tau_schedule) else tau_schedule
         root = run_mcts(
-            Turn.from_state(state),
+            turn,
             evaluate,
             num_simulations=num_simulations,
             c_puct=c_puct,
@@ -123,7 +135,15 @@ def generate_episode(
         pi = visit_distribution(root, tau=tau)
         pending.append((state, pi_to_vector(pi)))
 
-        action = sample_action(pi, rng)
+        representative = sample_action(pi, rng)
+        group = tied_actions(turn, representative)
+        # Widen back out to a real position sampled uniformly from the whole
+        # tied group - see tied_actions's docstring for why this matters:
+        # search only ever scored `representative`, but applying it verbatim
+        # every time would mean the *real* board layout self-play ever
+        # produces for a tie is always the same fixed position, never any
+        # other member a human could equally validly pick.
+        action = group[rng.integers(len(group))] if len(group) > 1 else representative
         state = apply_action(state, action)
         round_step += 1
     else:
@@ -238,7 +258,9 @@ def generate_episodes_batch(
         for slot, i in enumerate(active):
             pi = visit_distribution(roots[slot], tau=taus[slot])
             pending[i].append((states[i], pi_to_vector(pi)))
-            action = sample_action(pi, rngs[i])
+            representative = sample_action(pi, rngs[i])
+            group = tied_actions(turns[slot], representative)
+            action = group[rngs[i].integers(len(group))] if len(group) > 1 else representative
             states[i] = apply_action(states[i], action)
             steps[i] += 1
             round_steps[i] += 1

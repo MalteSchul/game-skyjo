@@ -35,6 +35,7 @@ below it (see `_is_round_closing`/`_advance_round_closing`).
 
 from __future__ import annotations
 
+import inspect
 import math
 from collections import Counter
 from collections.abc import Callable, Generator, Sequence
@@ -60,11 +61,32 @@ from skyjo.rl.hidden_info import (
 # priors: prob per legal (post-collapsing) action, normalized over legal actions only.
 # value: utility vector of length n_act, aligned to player index.
 LeafResult = tuple[dict[Action, float], np.ndarray]
+# Minimum contract: one GameState in, one LeafResult out. An implementation
+# may *additionally* accept a keyword-only `turn: Turn | None = None` (see
+# `make_network_evaluator`) - this module already has that leaf's `Turn` on
+# hand (it needs one anyway, for `_expand`'s equivalence-collapsing) and, when
+# the evaluator accepts it, passes it along so `encode_state` doesn't have to
+# re-derive `legal_actions(state)` from scratch to build its mask. Detected
+# once per search via `_accepts_keyword`, not assumed - a plain single-arg
+# evaluator (a test stub, a hand-rolled one) keeps working exactly as before.
 EvaluateFn = Callable[[GameState], LeafResult]
 # Same contract as EvaluateFn, but over many states at once (batch order in,
 # same order out) - one evaluator call instead of one per state. See
-# `run_mcts_batch`.
+# `run_mcts_batch`. May likewise accept an optional keyword-only `turns`.
 BatchEvaluateFn = Callable[[Sequence[GameState]], "list[LeafResult]"]
+
+
+def _accepts_keyword(fn: Callable, name: str) -> bool:
+    """Whether `fn(..., name=...)` is safe to call: `fn` declares that
+    keyword-only param explicitly, or accepts arbitrary `**kwargs`. Checked
+    once per `run_mcts`/`run_mcts_batch` call (not per leaf/simulation), so
+    the cost of introspecting `fn`'s signature is negligible next to the
+    hundreds of simulations it gates."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 DEFAULT_C_PUCT = 1.5
 DEFAULT_DIRICHLET_ALPHA = 0.3
@@ -225,43 +247,53 @@ def _select_edge(node: MCTSNode, c_puct: float) -> MCTSEdge:
 
 def _leaf_node(
     state: GameState, n_act: int
-) -> Generator[GameState, LeafResult, tuple[MCTSNode, np.ndarray]]:
+) -> Generator[tuple[GameState, Turn], LeafResult, tuple[MCTSNode, np.ndarray]]:
     """Builds the `MCTSNode` for a freshly-reached leaf `state`.
 
     A terminal state resolves immediately from the true final standings - no
-    evaluation needed, so this never yields for one. Otherwise it yields
-    `state` exactly once and expects the evaluator's `(priors, value)` result
-    sent back (via `.send`) to finish building the node. That single `yield`
-    is the seam that lets a caller batch this evaluation together with other
-    trees' pending leaves (`run_mcts_batch`) instead of every leaf calling an
-    evaluator on its own - see `_drive_gen` for the unbatched side of that
-    same seam.
+    evaluation needed, so this never yields for one. Otherwise it computes
+    this leaf's `Turn` once - needed regardless, for `_expand`'s equivalence
+    collapsing - and yields `(state, turn)` exactly once, expecting the
+    evaluator's `(priors, value)` result sent back (via `.send`) to finish
+    building the node. That single `yield` is the seam that lets a caller
+    batch this evaluation together with other trees' pending leaves
+    (`run_mcts_batch`) instead of every leaf calling an evaluator on its own -
+    see `_drive_gen` for the unbatched side of that same seam. Handing the
+    same `turn` object to the driver too (rather than it recomputing one) is
+    what lets an evaluator that accepts `turn`/`turns` skip re-deriving
+    `legal_actions(state)` a second time for this same leaf.
     """
     if _is_terminal(state):
         child = MCTSNode(state=state, n_act=n_act, is_terminal=True)
         child.value = _terminal_utility(state.total_scores)
         return child, child.value
 
-    priors, value = yield state
+    turn = Turn.from_state(state)
+    priors, value = yield state, turn
     child = MCTSNode(state=state, n_act=n_act, is_terminal=False)
-    _expand(child, Turn.from_state(state), priors)
+    _expand(child, turn, priors)
     child.value = value
     return child, value
 
 
-def _drive_gen(gen: Generator[GameState, LeafResult, None], evaluate: EvaluateFn) -> None:
+def _drive_gen(
+    gen: Generator[tuple[GameState, Turn], LeafResult, None], evaluate: EvaluateFn, *, supports_turn: bool
+) -> None:
     """Eagerly resolves a `_simulate_once_gen` generator with a synchronous,
     one-state-at-a-time `evaluate` call - this is what makes unbatched search
     (`_simulate_once`) and batched search (`run_mcts_batch`) run the exact
     same tree-walk code, just driven differently: one leaf at a time here,
-    many trees' leaves together there.
+    many trees' leaves together there. `supports_turn` - from `_accepts_keyword`,
+    checked once per search rather than once per leaf - decides whether the
+    leaf's already-computed `Turn` is worth passing to `evaluate` at all.
     """
     try:
-        leaf_state = next(gen)
+        leaf_state, turn = next(gen)
     except StopIteration:
         return  # resolved without an evaluation (a cached-terminal leaf)
+    result = evaluate(leaf_state, turn=turn) if supports_turn else evaluate(leaf_state)
     try:
-        gen.send(evaluate(leaf_state))
+        gen.send(result)
     except StopIteration:
         return
     raise AssertionError("_drive_gen: generator yielded more than once")
@@ -389,9 +421,14 @@ def _simulate_once_gen(
 
 
 def _simulate_once(
-    root: MCTSNode, evaluate: EvaluateFn, c_puct: float, rng: np.random.Generator
+    root: MCTSNode,
+    evaluate: EvaluateFn,
+    c_puct: float,
+    rng: np.random.Generator,
+    *,
+    supports_turn: bool,
 ) -> None:
-    _drive_gen(_simulate_once_gen(root, c_puct, rng), evaluate)
+    _drive_gen(_simulate_once_gen(root, c_puct, rng), evaluate, supports_turn=supports_turn)
 
 
 def run_mcts(
@@ -406,6 +443,7 @@ def run_mcts(
     rng: np.random.Generator | None = None,
     on_simulation: Callable[[int], None] | None = None,
     on_root_ready: Callable[[MCTSNode], None] | None = None,
+    reuse_root: MCTSNode | None = None,
 ) -> MCTSNode:
     """`on_root_ready`, if given, fires exactly once - after the root is
     expanded and root noise applied, before the first simulation - with the
@@ -413,6 +451,20 @@ def run_mcts(
     return. It exists so a caller can snapshot the tree mid-search (e.g. via
     `on_simulation`) without waiting for `run_mcts` to return: the object it
     receives *is* the live root, not a copy.
+
+    `reuse_root`, if given, must already be an expanded `MCTSNode` whose own
+    `.state` is exactly `gamestate_from_turn(root_turn)` - e.g. a child pulled
+    out of a previous `run_mcts` call's tree once the game has genuinely
+    advanced to that position (see `bots.mcts_bot.MctsBot`, the only current
+    caller). Search resumes from its existing edges/visit-counts instead of
+    expanding a fresh root, and `num_simulations` more are layered on top of
+    whatever it already has - the standard "carry the subtree forward" reuse
+    an AlphaZero-style search can do once the real game reaches a position it
+    already explored. Raises ValueError if the state doesn't match: this is a
+    last-resort consistency guard, not the primary safety mechanism - a
+    caller is expected to have already verified the position genuinely
+    advanced from `reuse_root`'s own state (`MctsBot` does, via its own
+    tree-walk) before ever passing one in.
     """
     if num_simulations < 0:
         raise ValueError("run_mcts: num_simulations must be >= 0")
@@ -420,19 +472,27 @@ def run_mcts(
 
     n_act = len(root_turn.boards)
     root_state = gamestate_from_turn(root_turn)
-    root = MCTSNode(state=root_state, n_act=n_act, is_terminal=False)
+    supports_turn = _accepts_keyword(evaluate, "turn")
 
-    priors, value = evaluate(root_state)
-    _expand(root, root_turn, priors)
-    root.value = value
-    if add_root_noise:
-        _apply_root_noise(root, dirichlet_alpha, dirichlet_epsilon, rng)
+    if reuse_root is not None:
+        if reuse_root.state != root_state:
+            raise ValueError("run_mcts: reuse_root.state does not match gamestate_from_turn(root_turn)")
+        root = reuse_root
+        if add_root_noise:
+            _apply_root_noise(root, dirichlet_alpha, dirichlet_epsilon, rng)
+    else:
+        root = MCTSNode(state=root_state, n_act=n_act, is_terminal=False)
+        priors, value = evaluate(root_state, turn=root_turn) if supports_turn else evaluate(root_state)
+        _expand(root, root_turn, priors)
+        root.value = value
+        if add_root_noise:
+            _apply_root_noise(root, dirichlet_alpha, dirichlet_epsilon, rng)
 
     if on_root_ready is not None:
         on_root_ready(root)
 
     for i in range(num_simulations):
-        _simulate_once(root, evaluate, c_puct, rng)
+        _simulate_once(root, evaluate, c_puct, rng, supports_turn=supports_turn)
         if on_simulation is not None:
             on_simulation(i + 1)
 
@@ -478,7 +538,12 @@ def run_mcts_batch(
         MCTSNode(state=gamestate_from_turn(turn), n_act=len(turn.boards), is_terminal=False)
         for turn in root_turns
     ]
-    root_results = evaluate_batch([root.state for root in roots])
+    supports_turns = _accepts_keyword(evaluate_batch, "turns")
+
+    root_states = [root.state for root in roots]
+    root_results = (
+        evaluate_batch(root_states, turns=root_turns) if supports_turns else evaluate_batch(root_states)
+    )
     for root, turn, (priors, value), rng in zip(roots, root_turns, root_results, rngs, strict=True):
         _expand(root, turn, priors)
         root.value = value
@@ -489,16 +554,23 @@ def run_mcts_batch(
         gens = [_simulate_once_gen(root, c_puct, rng) for root, rng in zip(roots, rngs, strict=True)]
         pending_indices: list[int] = []
         pending_states: list[GameState] = []
+        pending_turns: list[Turn] = []
         for i, gen in enumerate(gens):
             try:
-                pending_states.append(next(gen))
+                state, turn = next(gen)
+                pending_states.append(state)
+                pending_turns.append(turn)
                 pending_indices.append(i)
             except StopIteration:
                 pass  # resolved without an evaluation (a cached-terminal leaf)
 
         if not pending_states:
             continue
-        results = evaluate_batch(pending_states)
+        results = (
+            evaluate_batch(pending_states, turns=pending_turns)
+            if supports_turns
+            else evaluate_batch(pending_states)
+        )
         for i, result in zip(pending_indices, results, strict=True):
             try:
                 gens[i].send(result)

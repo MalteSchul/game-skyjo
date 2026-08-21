@@ -4,6 +4,7 @@ import pytest
 
 from skyjo.api.store import AutoplayStatus, MatchBusyError, MatchStore
 from skyjo.domain.engine import Action, ActionType, apply_action, new_match
+from skyjo.domain.observation import Turn
 
 # test_an_exception_in_work_still_resets_status_to_idle deliberately raises
 # inside a background thread; pytest's unhandled-thread-exception capture
@@ -29,6 +30,79 @@ def _compute_flip(position: int):
         return apply_action(state, _flip_action(position))
 
     return compute
+
+
+class _RecordingObserverBot:
+    """Implements `ObservesActions` but never actually acts - these tests
+    only care about whether/when `observe_transition` gets called."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Turn, Action, Turn]] = []
+
+    def choose_action(self, turn, *, report_progress=None):
+        raise NotImplementedError("not exercised by these tests")
+
+    def observe_transition(self, turn_before, action, turn_after) -> None:
+        self.calls.append((turn_before, action, turn_after))
+
+
+# --- observe_transition wiring: every seat's bot hears every real action -----
+
+
+def test_apply_action_notifies_every_seats_observer_bot_not_just_the_actor():
+    store = MatchStore()
+    state = new_match(player_count=2, seed=1)
+    observer_0, observer_1 = _RecordingObserverBot(), _RecordingObserverBot()
+    match_id = store.create(state, ("Ada", "Grace"), ("human", "human"), (observer_0, observer_1))
+
+    store.apply_action(match_id, _flip_action(0), _compute_flip(0))
+
+    assert len(observer_0.calls) == 1
+    assert len(observer_1.calls) == 1
+    assert observer_0.calls[0] == observer_1.calls[0]
+    turn_before, action, turn_after = observer_0.calls[0]
+    assert action == _flip_action(0)
+    assert turn_before.acting_player == 0
+    assert turn_after.boards[0].cards[0] is not None and turn_after.boards[0].cards[0].face_up
+
+
+def test_apply_autoplay_action_also_notifies_observer_bots():
+    store = MatchStore()
+    state = new_match(player_count=2, seed=1)
+    observer = _RecordingObserverBot()
+    match_id = store.create(state, ("Ada", "Grace"), ("human", "human"), (observer, None))
+    store.set_thinking(match_id, player=0)
+
+    store.apply_autoplay_action(match_id, _flip_action(0), _compute_flip(0))
+
+    assert len(observer.calls) == 1
+
+
+def test_start_next_round_does_not_notify_observer_bots():
+    # A next_round edge carries no action - nothing for observe_transition to
+    # report, and a freshly-dealt round is an independent shuffle anyway.
+    store = MatchStore()
+    state = new_match(player_count=2, seed=1)
+    observer = _RecordingObserverBot()
+    match_id = store.create(state, ("Ada", "Grace"), ("human", "human"), (observer, None))
+
+    store.start_next_round(match_id, lambda state: state)
+
+    assert observer.calls == []
+
+
+def test_a_bot_that_does_not_implement_observes_actions_is_left_alone():
+    store = MatchStore()
+    state = new_match(player_count=2, seed=1)
+
+    class _PlainBot:
+        def choose_action(self, turn, *, report_progress=None):
+            raise NotImplementedError
+
+    match_id = store.create(state, ("Ada", "Grace"), ("human", "human"), (_PlainBot(), None))
+
+    # Must not raise just because _PlainBot has no observe_transition.
+    store.apply_action(match_id, _flip_action(0), _compute_flip(0))
 
 
 # --- trigger_autoplay ---------------------------------------------------------

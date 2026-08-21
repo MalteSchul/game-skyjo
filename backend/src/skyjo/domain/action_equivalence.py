@@ -76,3 +76,15 @@ def distinct_actions(turn: Turn) -> tuple[Action, ...]:
         result.append(representative)
 
     return tuple(result)
+
+
+def tied_actions(turn: Turn, representative: Action) -> tuple[Action, ...]:
+    """Every real legal action `group_representatives` collapsed onto
+    `representative` - its full equivalence class, `representative` included.
+    Lets a caller that searched/scored only `representative` (as MCTS does)
+    widen back out to a real action before actually taking it, so which
+    literal board position gets used isn't always the same fixed one within
+    a tie - without changing what search itself explores.
+    """
+    mapping = group_representatives(turn)
+    return tuple(action for action in turn.legal_actions if mapping[action] == representative)
