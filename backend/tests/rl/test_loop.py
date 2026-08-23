@@ -28,6 +28,7 @@ def _tiny_config(**overrides) -> TrainingConfig:
         "train_steps_per_iteration": 1,
         "network_kwargs": {"trunk_dim": 8, "num_residual_blocks": 1},
         "workers": 0,
+        "selfplay_batch_size": 1,
         "seed": 0,
     }
     defaults.update(overrides)
@@ -78,7 +79,9 @@ def test_run_training_loop_passes_round_max_steps_and_max_rounds_to_generate_epi
         return _dummy_replay_samples(n_act=2, count=3)
 
     monkeypatch.setattr(loop_module, "generate_episode", fake_generate_episode)
-    config = _tiny_config(games_per_iteration=1, iterations=1, round_max_steps=17, max_rounds=3)
+    config = _tiny_config(
+        games_per_iteration=1, iterations=1, round_max_steps=17, max_rounds=3, selfplay_batch_size=1
+    )
 
     with MetricsLogger(tmp_path / "logs") as metrics:
         run_training_loop(config, metrics)
@@ -115,7 +118,7 @@ def test_run_training_loop_logs_avg_points_per_round(tmp_path, monkeypatch):
         return _dummy_replay_samples(n_act=2, count=3)
 
     monkeypatch.setattr(loop_module, "generate_episode", fake_generate_episode)
-    config = _tiny_config(games_per_iteration=1, iterations=1)
+    config = _tiny_config(games_per_iteration=1, iterations=1, selfplay_batch_size=1)
 
     with MetricsLogger(tmp_path / "logs") as metrics:
         run_training_loop(config, metrics)
@@ -129,7 +132,7 @@ def test_run_training_loop_avg_points_per_round_is_zero_when_every_game_fails(tm
         raise RuntimeError("simulated max_steps timeout")
 
     monkeypatch.setattr(loop_module, "generate_episode", always_fails)
-    config = _tiny_config(games_per_iteration=2, iterations=1)
+    config = _tiny_config(games_per_iteration=2, iterations=1, selfplay_batch_size=1)
 
     with MetricsLogger(tmp_path / "logs") as metrics:
         run_training_loop(config, metrics)
@@ -356,7 +359,7 @@ def test_run_training_loop_survives_every_game_failing(tmp_path, monkeypatch):
         raise AssertionError("simulated hidden_info bookkeeping bug")
 
     monkeypatch.setattr(loop_module, "generate_episode", always_fails)
-    config = _tiny_config(games_per_iteration=3, iterations=1)
+    config = _tiny_config(games_per_iteration=3, iterations=1, selfplay_batch_size=1)
 
     with MetricsLogger(tmp_path / "logs") as metrics:
         _, final_state = run_training_loop(config, metrics)
@@ -379,7 +382,7 @@ def test_run_training_loop_keeps_samples_from_games_that_succeed(tmp_path, monke
         return _dummy_replay_samples(n_act=2, count=5)
 
     monkeypatch.setattr(loop_module, "generate_episode", flaky)
-    config = _tiny_config(games_per_iteration=4, batch_size=2, iterations=1)
+    config = _tiny_config(games_per_iteration=4, batch_size=2, iterations=1, selfplay_batch_size=1)
 
     with MetricsLogger(tmp_path / "logs") as metrics:
         _, final_state = run_training_loop(config, metrics)
@@ -401,7 +404,7 @@ def test_run_training_loop_survives_an_exception_type_not_specifically_anticipat
         raise KeyError("simulated unanticipated bug")
 
     monkeypatch.setattr(loop_module, "generate_episode", always_fails)
-    config = _tiny_config(games_per_iteration=2, iterations=1)
+    config = _tiny_config(games_per_iteration=2, iterations=1, selfplay_batch_size=1)
 
     with MetricsLogger(tmp_path / "logs") as metrics:
         _, final_state = run_training_loop(config, metrics)
@@ -416,7 +419,7 @@ def test_run_training_loop_writes_failure_tracebacks_to_the_log_dir(tmp_path, mo
         raise RuntimeError("simulated max_steps timeout")
 
     monkeypatch.setattr(loop_module, "generate_episode", always_fails)
-    config = _tiny_config(games_per_iteration=2, iterations=1)
+    config = _tiny_config(games_per_iteration=2, iterations=1, selfplay_batch_size=1)
 
     with MetricsLogger(tmp_path / "logs") as metrics:
         run_training_loop(config, metrics)

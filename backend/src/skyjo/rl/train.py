@@ -31,7 +31,7 @@ class TrainingBatch:
     legal_action_mask: torch.Tensor  # (B, ACTION_SPACE_SIZE) bool
     active_count: torch.Tensor  # (B,) long
     pi_target: torch.Tensor  # (B, ACTION_SPACE_SIZE)
-    y: torch.Tensor  # (B, N_MAX_PLAYERS) long, padding beyond n_act is masked out, not read
+    y: torch.Tensor  # (B, N_MAX_PLAYERS) long, canonical slot order (see encoding.rotation_perm); padding beyond n_act is masked out, not read
 
 
 def collate_batch(
@@ -62,8 +62,9 @@ def collate_batch(
     pi_target = torch.from_numpy(np.stack([s.pi for s in samples])).to(device)
 
     y = torch.zeros(len(samples), N_MAX_PLAYERS, dtype=torch.long, device=device)
-    for i, sample in enumerate(samples):
-        y[i, : sample.n_act] = torch.from_numpy(sample.y)
+    for i, (sample, encoding) in enumerate(zip(samples, encodings, strict=True)):
+        n = sample.n_act
+        y[i, :n] = torch.from_numpy(sample.y[encoding.perm[:n]])  # absolute order -> canonical slot order
 
     return TrainingBatch(
         features=features,

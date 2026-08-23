@@ -99,10 +99,16 @@ def make_network_evaluator(
             for i in range(ACTION_SPACE_SIZE)
             if encoding.legal_action_mask[i]
         }
-        value = utility[0, : encoding.active_count].cpu().numpy()
+        n = encoding.active_count
+        perm = encoding.perm[:n]
+        value_canonical = utility[0, :n].cpu().numpy()
+        value = np.empty_like(value_canonical)
+        value[perm] = value_canonical  # canonical slot -> absolute player id
         if rank_probs_sink is not None:
-            n = encoding.active_count
-            rank_probs_sink[state] = rank_probs[0, :n, :n].cpu().numpy()
+            rank_probs_canonical = rank_probs[0, :n, :n].cpu().numpy()  # [canonical slot, rank]
+            rank_probs_abs = np.empty_like(rank_probs_canonical)
+            rank_probs_abs[perm] = rank_probs_canonical
+            rank_probs_sink[state] = rank_probs_abs
         return priors, value
 
     return evaluate
@@ -154,7 +160,12 @@ def make_batch_network_evaluator(
                 for j in range(ACTION_SPACE_SIZE)
                 if encoding.legal_action_mask[j]
             }
-            results.append((priors, utility[i, : encoding.active_count]))
+            n = encoding.active_count
+            perm = encoding.perm[:n]
+            value_canonical = utility[i, :n]
+            value = np.empty_like(value_canonical)
+            value[perm] = value_canonical  # canonical slot -> absolute player id
+            results.append((priors, value))
         return results
 
     return evaluate_batch

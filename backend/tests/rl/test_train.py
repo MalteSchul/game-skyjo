@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import numpy as np
 import pytest
 import torch
@@ -10,8 +12,9 @@ from skyjo.rl.selfplay import ReplaySample
 from skyjo.rl.train import collate_batch, compute_loss, training_step
 
 
-def _sample(seed: int, n_act: int, y: list[int]) -> ReplaySample:
+def _sample(seed: int, n_act: int, y: list[int], *, current_player: int = 0) -> ReplaySample:
     state = new_match(player_count=n_act, seed=seed)
+    state = replace(state, current_player=current_player)
     pi = np.zeros(ACTION_SPACE_SIZE, dtype=np.float32)
     pi[: n_act + 1] = 1.0 / (n_act + 1)  # arbitrary valid distribution
     return ReplaySample(state=state, n_act=n_act, pi=pi, y=np.array(y, dtype=np.int64))
@@ -83,6 +86,36 @@ def test_rank_loss_ignores_padding_beyond_n_act():
     _, corrupted_metrics = compute_loss(net, corrupted)
 
     assert real_metrics["rank_loss"] == pytest.approx(corrupted_metrics["rank_loss"])
+
+
+# --- y is rotated into each sample's own canonical slot order --------------
+
+
+def test_collate_batch_rotates_y_through_the_samples_own_permutation():
+    # sample.y is stored in absolute player order; collate_batch must permute
+    # it into the same canonical (current-player-at-slot-0) order the
+    # encoding uses, or the network trains against mismatched inputs/targets.
+    sample = _sample(1, 4, [10, 20, 30, 40], current_player=1)
+    encoding = encode_state(sample.state)
+    assert encoding.perm[:4].tolist() == [1, 2, 3, 0]  # sanity: a genuine rotation, not identity
+
+    batch = collate_batch([sample], encodings=[encoding])
+
+    # canonical slot s holds absolute player perm[s], so y[s] must be
+    # sample.y[perm[s]].
+    assert batch.y[0].tolist()[:4] == [20, 30, 40, 10]
+
+
+def test_collate_batch_rotates_y_independently_per_row_in_a_mixed_batch():
+    sample_a = _sample(1, 3, [1, 2, 3], current_player=2)
+    sample_b = _sample(2, 3, [4, 5, 6], current_player=0)
+
+    batch = collate_batch([sample_a, sample_b])
+
+    # current_player=2, n_act=3 -> perm = [2, 0, 1] -> y = [3, 1, 2]
+    assert batch.y[0].tolist()[:3] == [3, 1, 2]
+    # current_player=0 is the identity permutation -> y unchanged
+    assert batch.y[1].tolist()[:3] == [4, 5, 6]
 
 
 # --- bad path ------------------------------------------------------------

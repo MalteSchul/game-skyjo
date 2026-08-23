@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -110,6 +112,48 @@ def test_rank_probs_sink_only_holds_the_active_n_by_n_slice():
     evaluate(state)
 
     assert sink[state].shape == (2, 2)
+
+
+# --- output un-rotation: canonical (rotated) network output must map back ---
+# --- to the correct absolute player index, not just pass through identity ---
+
+
+def test_evaluate_un_rotates_value_back_to_absolute_player_index():
+    # A fresh match has all-zero total_scores/finisher/awaiting features, so
+    # permuting `boards` alone produces a state whose canonical-order feature
+    # vector is identical to the original's - letting us predict exactly how
+    # `evaluate`'s absolute-indexed output must relate between the two,
+    # without needing to inspect the network's internals.
+    net = _tiny_net()
+    state = new_match(player_count=3, seed=1)
+    evaluate = make_network_evaluator(net)
+
+    rotated_state = replace(state, current_player=1)
+    mirror_state = replace(state, boards=(state.boards[1], state.boards[2], state.boards[0]), current_player=0)
+
+    _, rotated_value = evaluate(rotated_state)
+    _, mirror_value = evaluate(mirror_state)
+
+    # rotated_state's canonical slot `s` holds absolute player (1 + s) % 3,
+    # and mirror_state (current_player=0, so canonical order == its own
+    # `boards` order) holds the same boards at slot `s` directly.
+    for slot in range(3):
+        assert rotated_value[(1 + slot) % 3] == pytest.approx(mirror_value[slot])
+
+
+def test_batch_evaluate_un_rotates_value_back_to_absolute_player_index():
+    net = _tiny_net()
+    state = new_match(player_count=3, seed=1)
+    batch_evaluate = make_batch_network_evaluator(net)
+
+    rotated_state = replace(state, current_player=1)
+    mirror_state = replace(state, boards=(state.boards[1], state.boards[2], state.boards[0]), current_player=0)
+
+    [(_, rotated_value)] = batch_evaluate([rotated_state])
+    [(_, mirror_value)] = batch_evaluate([mirror_state])
+
+    for slot in range(3):
+        assert rotated_value[(1 + slot) % 3] == pytest.approx(mirror_value[slot])
 
 
 # --- make_batch_network_evaluator ------------------------------------------

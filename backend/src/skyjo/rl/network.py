@@ -92,9 +92,11 @@ class AlphaZeroNet(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns (policy_probs (B, |A|), rank_probs (B, 8, 8), utility (B, 8)).
 
-        `rank_probs[b, i, r]` is P(player i finishes at rank r | state b), zero
-        for any i or r >= active_count[b]. `utility[b, i]` is likewise zero
-        for i >= active_count[b].
+        `rank_probs[b, i, r]` is P(the player at canonical slot i finishes at
+        rank r | state b) - `i` indexes canonical (rotated) player order, not
+        absolute seat id; see `encoding.rotation_perm`. Zero for any i or
+        r >= active_count[b]. `utility[b, i]` is likewise canonical-slot-
+        indexed and zero for i >= active_count[b].
         """
         h = self.trunk(features)
 

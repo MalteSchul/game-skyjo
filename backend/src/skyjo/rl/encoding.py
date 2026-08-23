@@ -5,6 +5,16 @@ beyond the active player count `N_act` are zero-padded up to `N_MAX_PLAYERS`.
 That's what lets one network handle every match size from 2 to 8 players -
 `N_act` itself is included as a one-hot feature so the network can tell a
 padded slot from a genuinely empty one.
+
+Players are encoded in *canonical* (rotated) order, not absolute seat order:
+slot 0 always holds the state's `current_player`, slot 1 the next player in
+turn order, and so on (see `rotation_perm`). This is the AlphaZero
+board-flipping trick - it makes "whose turn it is" a structural property of
+the input (always slot 0) instead of something the network has to learn from
+a separate one-hot feature, and lets the same weights generalize across
+seats. `StateEncoding.perm` records the permutation used, so callers can map
+the network's per-player output (also in canonical order) back to absolute
+seat indices - see `evaluator.py`.
 """
 
 from __future__ import annotations
@@ -55,7 +65,6 @@ GLOBAL_FEATURES = (
     + N_MAX_PLAYERS  # players_awaiting_final_turn multi-hot
     + N_MAX_PLAYERS  # total_scores, normalized
     + 1  # target_score, normalized
-    + N_MAX_PLAYERS  # active player k, one-hot
     + _ACTIVE_COUNT_CLASSES  # N_act, one-hot
 )
 
@@ -66,11 +75,25 @@ def _normalize_value(value: int) -> float:
     return (value - _MIN_CARD_VALUE) / (_MAX_CARD_VALUE - _MIN_CARD_VALUE)
 
 
+def rotation_perm(current_player: int, n_act: int) -> np.ndarray:
+    """`perm[slot]` is the absolute player id occupying canonical `slot`.
+    `perm[0] == current_player` always; slots `n_act..N_MAX_PLAYERS` are
+    unused padding, left as identity so the array is always fully defined.
+
+    To rotate an absolute-order array `a` (len `n_act`) into canonical order:
+    `a[perm[:n_act]]`. To un-rotate a canonical-order array `v` (len `n_act`)
+    back to absolute order: `out = np.empty_like(v); out[perm[:n_act]] = v`.
+    """
+    perm = np.arange(N_MAX_PLAYERS)
+    perm[:n_act] = (current_player + np.arange(n_act)) % n_act
+    return perm
+
+
 @dataclass(frozen=True)
 class StateEncoding:
     features: np.ndarray  # shape (INPUT_DIM,), float32
     legal_action_mask: np.ndarray  # shape (ACTION_SPACE_SIZE,), bool
-    active_player: int  # k
+    perm: np.ndarray  # shape (N_MAX_PLAYERS,), see `rotation_perm`
     active_count: int  # N_act
 
 
@@ -94,8 +117,11 @@ def encode_state(state: GameState, *, legal_actions: Sequence[Action] | None = N
     if legal_actions is None:
         legal_actions = distinct_actions(Turn.from_state(state))
 
+    perm = rotation_perm(state.current_player, n_act)
+
     board_block = np.zeros((N_MAX_PLAYERS, _BOARD_FEATURES), dtype=np.float32)
-    for player, board in enumerate(state.boards):
+    for canonical_slot in range(n_act):
+        board = state.boards[perm[canonical_slot]]
         slot = np.zeros((BOARD_SIZE, _CARD_FEATURES), dtype=np.float32)
         for position, card in enumerate(board.cards):
             if card is None:
@@ -103,7 +129,7 @@ def encode_state(state: GameState, *, legal_actions: Sequence[Action] | None = N
             slot[position, 0] = 1.0
             slot[position, 1] = 1.0 if card.face_up else 0.0
             slot[position, 2] = _normalize_value(card.value) if card.face_up else _ABSENT_VALUE
-        board_block[player] = slot.reshape(-1)
+        board_block[canonical_slot] = slot.reshape(-1)
 
     mask = legal_action_mask(state, actions=legal_actions)
 
@@ -120,24 +146,20 @@ def encode_state(state: GameState, *, legal_actions: Sequence[Action] | None = N
 
     finisher_onehot = [0.0] * N_MAX_PLAYERS
     if state.finisher is not None:
-        finisher_onehot[state.finisher] = 1.0
+        finisher_onehot[(state.finisher - state.current_player) % n_act] = 1.0
     global_features += finisher_onehot
 
     awaiting_multihot = [0.0] * N_MAX_PLAYERS
     for player in state.players_awaiting_final_turn:
-        awaiting_multihot[player] = 1.0
+        awaiting_multihot[(player - state.current_player) % n_act] = 1.0
     global_features += awaiting_multihot
 
     total_scores_norm = [0.0] * N_MAX_PLAYERS
-    for player in range(n_act):
-        total_scores_norm[player] = state.total_scores[player] / max(state.target_score, 1)
+    for canonical_slot in range(n_act):
+        total_scores_norm[canonical_slot] = state.total_scores[perm[canonical_slot]] / max(state.target_score, 1)
     global_features += total_scores_norm
 
     global_features += [state.target_score / DEFAULT_TARGET_SCORE]
-
-    active_player_onehot = [0.0] * N_MAX_PLAYERS
-    active_player_onehot[state.current_player] = 1.0
-    global_features += active_player_onehot
 
     active_count_onehot = [0.0] * _ACTIVE_COUNT_CLASSES
     active_count_onehot[n_act - MIN_PLAYERS] = 1.0
@@ -151,6 +173,6 @@ def encode_state(state: GameState, *, legal_actions: Sequence[Action] | None = N
     return StateEncoding(
         features=features,
         legal_action_mask=mask,
-        active_player=state.current_player,
+        perm=perm,
         active_count=n_act,
     )
