@@ -178,6 +178,21 @@ def test_run_training_loop_skips_training_until_buffer_has_a_full_batch(tmp_path
     assert final_state.total_train_steps == 0
 
 
+def test_run_training_loop_seeds_buffer_from_initial_samples(tmp_path, monkeypatch):
+    # Same shape as test_run_training_loop_skips_training_until_buffer_has_a_full_batch
+    # (self-play alone can't fill a batch_size=5000 buffer from one tiny game),
+    # but here initial_samples pre-fills the buffer so training should proceed
+    # on iteration 1 instead of being skipped.
+    monkeypatch.setattr(loop_module, "generate_episode", lambda *a, **k: [])
+    config = _tiny_config(games_per_iteration=1, buffer_capacity=5000, batch_size=5000, train_steps_per_iteration=1, iterations=1)
+    seed_samples = _dummy_replay_samples(n_act=2, count=5000)
+
+    with MetricsLogger(tmp_path / "logs") as metrics:
+        _, final_state = run_training_loop(config, metrics, initial_samples=seed_samples)
+
+    assert final_state.total_train_steps == 1
+
+
 def test_run_training_loop_writes_resumable_checkpoints(tmp_path):
     config = _tiny_config(checkpoint_dir=str(tmp_path / "checkpoints"), checkpoint_every=1)
 

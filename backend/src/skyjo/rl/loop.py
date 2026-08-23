@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import time
 import traceback
+from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -451,11 +452,19 @@ def run_training_loop(
     net: AlphaZeroNet | None = None,
     optimizer: torch.optim.Optimizer | None = None,
     start_state: LoopState | None = None,
+    initial_samples: Sequence[ReplaySample] | None = None,
 ) -> tuple[AlphaZeroNet, LoopState]:
     net = net if net is not None else AlphaZeroNet(**config.network_kwargs)
     optimizer = optimizer if optimizer is not None else torch.optim.Adam(net.parameters(), lr=config.lr)
     state = start_state if start_state is not None else LoopState()
     buffer = ReplayBuffer(config.buffer_capacity)
+    if initial_samples:
+        # Seeds the FIFO buffer before self-play starts (e.g. with a bootstrap
+        # dataset) so early iterations don't train on nothing but a single
+        # iteration's narrow, low-diversity self-play batch - self-play samples
+        # then evict these oldest-first as the buffer fills, a gradual ramp
+        # instead of a cliff from imitation data to self-play data.
+        buffer.add_episode(initial_samples[: config.buffer_capacity])
     # Not restored from a checkpoint on resume, so a resumed run's self-play
     # samples diverge from an equivalent from-scratch run - acceptable, this
     # is exploration noise, not something training correctness depends on.

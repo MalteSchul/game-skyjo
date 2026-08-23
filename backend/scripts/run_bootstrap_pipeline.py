@@ -24,7 +24,7 @@ tournament.py: the gate needs a structured win_rate number to check against
 interactive step, not something to launch as a subprocess.
 
 Usage:
-  uv run python scripts/run_bootstrap_pipeline.py --run-name exp1 --games 10000 \
+  uv run python scripts/run_bootstrap_pipeline.py --run-name exp1 --target-samples 500000 \
       --bootstrap-train-steps 5000 --iterations 200 --games-per-iteration 32 --eval-every 5
 
 Every stage's output goes to a predictable path under --output-root/--run-name,
@@ -41,6 +41,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from skyjo.rl.bootstrap import DEFAULT_BOOTSTRAP_SAMPLES
 from skyjo.rl.checkpoint import load_checkpoint
 from skyjo.rl.evaluator import evaluate_vs_heuristic
 from skyjo.rl.network import AlphaZeroNet
@@ -61,18 +62,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--force", action="store_true", help="redo the dataset/bootstrap stages even if their output already exists")
 
     dataset = parser.add_argument_group("stage 1: dataset")
-    dataset.add_argument("--games", type=int, default=10_000)
+    dataset.add_argument("--target-samples", type=int, default=DEFAULT_BOOTSTRAP_SAMPLES)
     dataset.add_argument("--dataset-workers", type=int, default=0, help="parallelism barely helps at this game size - see bootstrap_heuristic.py's benchmark notes")
     dataset.add_argument(
         "--dataset-checkpoint-interval-seconds",
         type=float,
         default=120.0,
         help="bootstrap_heuristic.py's own default (30s) rewrites the *entire* growing dataset to disk "
-        "every interval - fine for a small run, but at 10k+ games that file gets large enough (approaching "
-        "a GB) that repeated full rewrites can end up dominating wall time over just letting generation "
-        "run and saving occasionally. Raised here to bound that to at most a couple of rewrites for a "
-        "~10k-game run rather than one every 30s; raise further (or pass a very large value) if you don't "
-        "need interrupt-safety at all for a run you're actively supervising.",
+        "every interval - fine for a small run, but at a large --target-samples that file gets large "
+        "enough (approaching a GB) that repeated full rewrites can end up dominating wall time over just "
+        "letting generation run and saving occasionally. Raised here to bound that to at most a couple of "
+        "rewrites for a ~500k-sample run rather than one every 30s; raise further (or pass a very large "
+        "value) if you don't need interrupt-safety at all for a run you're actively supervising.",
     )
 
     bootstrap = parser.add_argument_group("stage 2: bootstrap training")
@@ -90,6 +91,20 @@ def _parse_args() -> argparse.Namespace:
     sanity.add_argument("--sanity-games", type=int, default=40)
     sanity.add_argument("--sanity-num-simulations", type=int, default=20)
     sanity.add_argument("--min-win-rate", type=float, default=0.5, help="the bootstrap checkpoint must clear this win rate vs HeuristicBot or the pipeline stops here")
+    sanity.add_argument(
+        "--sanity-workers",
+        type=int,
+        default=0,
+        help="passed through to evaluate_vs_heuristic's workers - shards games across a process pool; "
+        "requires --sanity-batch-size > 1 to have any effect (see evaluate_vs_heuristic's docstring)",
+    )
+    sanity.add_argument(
+        "--sanity-batch-size",
+        type=int,
+        default=1,
+        help="passed through to evaluate_vs_heuristic's eval_batch_size - batches this many games' MCTS "
+        "leaf evaluations into one network call, at the cost of no tree reuse across a game's own turns",
+    )
 
     selfplay = parser.add_argument_group("stage 4: self-play loop")
     selfplay.add_argument("--iterations", type=int, default=200)
@@ -137,8 +152,8 @@ def _run_dataset_stage(args: argparse.Namespace, dataset_path: Path) -> None:
         [
             sys.executable,
             "scripts/bootstrap_heuristic.py",
-            "--games",
-            str(args.games),
+            "--target-samples",
+            str(args.target_samples),
             "--workers",
             str(args.dataset_workers),
             "--max-steps-per-episode",
@@ -187,7 +202,8 @@ def _run_bootstrap_stage(args: argparse.Namespace, dataset_path: Path, checkpoin
 
 
 def _run_sanity_stage(args: argparse.Namespace, checkpoint_path: Path) -> float:
-    net = AlphaZeroNet(trunk_dim=args.trunk_dim, num_residual_blocks=args.residual_blocks)
+    network_kwargs = {"trunk_dim": args.trunk_dim, "num_residual_blocks": args.residual_blocks}
+    net = AlphaZeroNet(**network_kwargs)
     load_checkpoint(checkpoint_path, net)
     result = evaluate_vs_heuristic(
         net,
@@ -197,6 +213,9 @@ def _run_sanity_stage(args: argparse.Namespace, checkpoint_path: Path) -> float:
         round_max_steps=args.round_max_steps,
         max_rounds=args.max_rounds,
         seed=args.seed,
+        workers=args.sanity_workers,
+        eval_batch_size=args.sanity_batch_size,
+        network_kwargs=network_kwargs,
     )
     print(
         f"[3/4] sanity check vs HeuristicBot: {result.games_played} games, "

@@ -13,23 +13,36 @@ from skyjo.rl.bootstrap import (
 
 
 def test_generate_heuristic_dataset_produces_samples_with_no_failures():
-    samples, failed_games = generate_heuristic_dataset(5, min_players=2, max_players=2, workers=0, seed=0)
+    samples, failed_games, games_played = generate_heuristic_dataset(
+        1, min_players=2, max_players=2, workers=0, seed=0, games_per_batch=5
+    )
 
     assert failed_games == 0
     assert len(samples) > 0
+    assert games_played > 0
     assert all(sample.n_act == 2 for sample in samples)
 
 
+def test_generate_heuristic_dataset_stops_once_target_samples_is_reached():
+    samples, _, games_played = generate_heuristic_dataset(1, min_players=2, max_players=2, workers=0, seed=0, games_per_batch=5)
+
+    assert len(samples) >= 1
+    # a target of 1 sample should be cleared by the first batch of games, not require a second one
+    assert games_played == 5
+
+
 def test_generate_heuristic_dataset_is_deterministic_for_the_same_seed():
-    first, _ = generate_heuristic_dataset(4, min_players=2, max_players=2, workers=0, seed=3)
-    second, _ = generate_heuristic_dataset(4, min_players=2, max_players=2, workers=0, seed=3)
+    first, _, _ = generate_heuristic_dataset(50, min_players=2, max_players=2, workers=0, seed=3, games_per_batch=5)
+    second, _, _ = generate_heuristic_dataset(50, min_players=2, max_players=2, workers=0, seed=3, games_per_batch=5)
 
     assert [s.n_act for s in first] == [s.n_act for s in second]
     assert [tuple(s.y.tolist()) for s in first] == [tuple(s.y.tolist()) for s in second]
 
 
 def test_generate_heuristic_dataset_supports_a_player_count_range():
-    samples, failed_games = generate_heuristic_dataset(6, min_players=2, max_players=4, workers=0, seed=1)
+    samples, failed_games, _ = generate_heuristic_dataset(
+        30, min_players=2, max_players=4, workers=0, seed=1, games_per_batch=6
+    )
 
     assert failed_games == 0
     assert {s.n_act for s in samples} <= {2, 3, 4}
@@ -50,7 +63,9 @@ def test_generate_heuristic_dataset_survives_a_failing_game(monkeypatch):
 
     monkeypatch.setattr(bootstrap_module, "generate_bot_episode", flaky)
 
-    samples, failed_games = generate_heuristic_dataset(3, min_players=2, max_players=2, workers=0, seed=0)
+    samples, failed_games, _ = generate_heuristic_dataset(
+        20, min_players=2, max_players=2, workers=0, seed=0, games_per_batch=3
+    )
 
     assert failed_games == 1
     assert len(samples) > 0
@@ -59,14 +74,14 @@ def test_generate_heuristic_dataset_survives_a_failing_game(monkeypatch):
 # --- bad path ------------------------------------------------------------
 
 
-def test_generate_heuristic_dataset_rejects_non_positive_num_games():
+def test_generate_heuristic_dataset_rejects_non_positive_target_samples():
     with pytest.raises(ValueError):
         generate_heuristic_dataset(0)
 
 
 def test_generate_heuristic_dataset_rejects_an_invalid_player_range():
     with pytest.raises(ValueError):
-        generate_heuristic_dataset(3, min_players=4, max_players=2)
+        generate_heuristic_dataset(30, min_players=4, max_players=2)
 
 
 # --- on_game_done progress/checkpoint hook ----------------------------------
@@ -75,16 +90,17 @@ def test_generate_heuristic_dataset_rejects_an_invalid_player_range():
 def test_on_game_done_is_called_once_per_game_with_matching_totals():
     calls: list[tuple[int, bool]] = []
 
-    samples, failed_games = generate_heuristic_dataset(
-        5,
+    samples, failed_games, games_played = generate_heuristic_dataset(
+        20,
         min_players=2,
         max_players=2,
         workers=0,
         seed=0,
+        games_per_batch=5,
         on_game_done=lambda episode_samples, failed: calls.append((len(episode_samples), failed)),
     )
 
-    assert len(calls) == 5
+    assert len(calls) == games_played
     assert sum(n for n, _ in calls) == len(samples)
     assert sum(1 for _, failed in calls if failed) == failed_games
 
@@ -105,11 +121,12 @@ def test_on_game_done_sees_completed_games_even_when_a_later_one_is_interrupted(
     seen: list[list] = []
     with pytest.raises(KeyboardInterrupt):
         generate_heuristic_dataset(
-            5,
+            10_000_000,
             min_players=2,
             max_players=2,
             workers=0,
             seed=0,
+            games_per_batch=5,
             on_game_done=lambda episode_samples, failed: seen.append(episode_samples),
         )
 
@@ -124,7 +141,7 @@ def test_on_game_done_sees_completed_games_even_when_a_later_one_is_interrupted(
 
 
 def test_save_and_load_replay_samples_round_trips(tmp_path):
-    samples, _ = generate_heuristic_dataset(4, min_players=2, max_players=2, workers=0, seed=2)
+    samples, _, _ = generate_heuristic_dataset(20, min_players=2, max_players=2, workers=0, seed=2, games_per_batch=4)
     path = tmp_path / "dataset.pkl"
 
     save_replay_samples(samples, path)
@@ -138,7 +155,7 @@ def test_save_and_load_replay_samples_round_trips(tmp_path):
 
 
 def test_save_replay_samples_creates_missing_parent_directories(tmp_path):
-    samples, _ = generate_heuristic_dataset(2, min_players=2, max_players=2, workers=0, seed=4)
+    samples, _, _ = generate_heuristic_dataset(1, min_players=2, max_players=2, workers=0, seed=4, games_per_batch=2)
     path = tmp_path / "nested" / "dir" / "dataset.pkl"
 
     save_replay_samples(samples, path)
@@ -148,7 +165,7 @@ def test_save_replay_samples_creates_missing_parent_directories(tmp_path):
 
 
 def test_save_replay_samples_does_not_leave_a_tmp_file_behind(tmp_path):
-    samples, _ = generate_heuristic_dataset(2, min_players=2, max_players=2, workers=0, seed=5)
+    samples, _, _ = generate_heuristic_dataset(1, min_players=2, max_players=2, workers=0, seed=5, games_per_batch=2)
     path = tmp_path / "dataset.pkl"
 
     save_replay_samples(samples, path)
@@ -173,7 +190,7 @@ def test_load_replay_samples_rejects_a_missing_file(tmp_path):
 
 
 def test_subsample_replay_samples_reduces_to_max_samples():
-    samples, _ = generate_heuristic_dataset(10, min_players=2, max_players=2, workers=0, seed=0)
+    samples, _, _ = generate_heuristic_dataset(40, min_players=2, max_players=2, workers=0, seed=0, games_per_batch=10)
     rng = np.random.default_rng(0)
 
     subsampled = subsample_replay_samples(samples, 3, rng)
@@ -183,7 +200,7 @@ def test_subsample_replay_samples_reduces_to_max_samples():
 
 
 def test_subsample_replay_samples_is_a_no_op_when_already_at_or_under_the_cap():
-    samples, _ = generate_heuristic_dataset(3, min_players=2, max_players=2, workers=0, seed=0)
+    samples, _, _ = generate_heuristic_dataset(1, min_players=2, max_players=2, workers=0, seed=0, games_per_batch=3)
     rng = np.random.default_rng(0)
 
     assert subsample_replay_samples(samples, len(samples), rng) == samples
@@ -191,7 +208,7 @@ def test_subsample_replay_samples_is_a_no_op_when_already_at_or_under_the_cap():
 
 
 def test_subsample_replay_samples_rejects_a_non_positive_max_samples():
-    samples, _ = generate_heuristic_dataset(2, min_players=2, max_players=2, workers=0, seed=0)
+    samples, _, _ = generate_heuristic_dataset(1, min_players=2, max_players=2, workers=0, seed=0, games_per_batch=2)
     rng = np.random.default_rng(0)
 
     with pytest.raises(ValueError):

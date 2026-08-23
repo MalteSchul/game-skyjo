@@ -26,6 +26,10 @@ from skyjo.bots.heuristic_bot import HeuristicBot
 from skyjo.domain.engine import MAX_PLAYERS, MIN_PLAYERS, new_match
 from skyjo.rl.selfplay import DEFAULT_MAX_STEPS, ReplaySample, generate_bot_episode
 
+# Enough to comfortably cover a bootstrap training run without regenerating a
+# much larger dataset than needed - see `generate_heuristic_dataset`.
+DEFAULT_BOOTSTRAP_SAMPLES = 500_000
+
 
 @dataclass(frozen=True)
 class _BotGameJob:
@@ -46,22 +50,34 @@ def _play_one_bot_game(job: _BotGameJob) -> list[ReplaySample]:
 
 
 def generate_heuristic_dataset(
-    num_games: int,
+    target_samples: int,
     *,
     min_players: int = MIN_PLAYERS,
     max_players: int = MIN_PLAYERS,
     max_steps: int = DEFAULT_MAX_STEPS,
     workers: int = 0,
     seed: int = 0,
+    games_per_batch: int | None = None,
     on_game_done: Callable[[list[ReplaySample], bool], None] | None = None,
-) -> tuple[list[ReplaySample], int]:
-    """Returns (samples, failed_game_count) from `num_games` HeuristicBot-vs-
-    HeuristicBot games (each seat gets its own seed, for tie-break variety).
+) -> tuple[list[ReplaySample], int, int]:
+    """Returns (samples, failed_game_count, games_played) from HeuristicBot-vs-
+    HeuristicBot games (each seat gets its own seed, for tie-break variety),
+    played in batches of `games_per_batch` until `len(samples) >=
+    target_samples`. A game's length (and so its sample count) isn't known
+    ahead of time - it varies with player count and how the round plays out -
+    so games are generated a batch at a time rather than trying to precompute
+    how many games would hit the target.
+
+    `games_per_batch` defaults to `max(workers, 1) * 4`: large enough to keep
+    a `workers`-sized process pool busy each round, small enough that
+    overshooting `target_samples` (the loop only checks the total between
+    batches, not mid-batch) stays modest.
 
     `workers <= 1` runs serially in-process - no subprocess/pickling, which
     is what keeps this fast and deterministic to unit-test; `workers > 1`
     spawns a plain `ProcessPoolExecutor` (no shared state needed across
-    workers, unlike MCTS self-play's network broadcast in `rl.loop`).
+    workers, unlike MCTS self-play's network broadcast in `rl.loop`), kept
+    open across batches rather than respawned each round.
 
     `on_game_done`, if given, is called once per completed game (in
     completion order) with that game's samples (empty if the game failed)
@@ -73,26 +89,23 @@ def generate_heuristic_dataset(
     `on_game_done` - that's the caller's route to keeping what was generated
     before the interruption instead of losing all of it.
     """
-    if num_games <= 0:
-        raise ValueError("generate_heuristic_dataset: num_games must be > 0")
+    if target_samples <= 0:
+        raise ValueError("generate_heuristic_dataset: target_samples must be > 0")
     if not (MIN_PLAYERS <= min_players <= max_players <= MAX_PLAYERS):
         raise ValueError(
             "generate_heuristic_dataset: require MIN_PLAYERS <= min_players <= max_players <= MAX_PLAYERS"
         )
 
+    batch_size = games_per_batch if games_per_batch is not None else max(workers, 1) * 4
     rng = np.random.default_rng(seed)
-    player_counts = rng.integers(min_players, max_players + 1, size=num_games)
-    game_seeds = rng.integers(0, 2**31 - 1, size=num_games)
-    jobs = [
-        _BotGameJob(game_seed=int(game_seed), player_count=int(player_count), max_steps=max_steps)
-        for game_seed, player_count in zip(game_seeds, player_counts, strict=True)
-    ]
 
     samples: list[ReplaySample] = []
     failed_games = 0
+    games_played = 0
 
     def _consume(episode_samples: list[ReplaySample]) -> None:
-        nonlocal failed_games
+        nonlocal failed_games, games_played
+        games_played += 1
         if episode_samples:
             samples.extend(episode_samples)
         else:
@@ -100,15 +113,25 @@ def generate_heuristic_dataset(
         if on_game_done is not None:
             on_game_done(episode_samples, not episode_samples)
 
+    def _next_batch_jobs() -> list[_BotGameJob]:
+        player_counts = rng.integers(min_players, max_players + 1, size=batch_size)
+        game_seeds = rng.integers(0, 2**31 - 1, size=batch_size)
+        return [
+            _BotGameJob(game_seed=int(game_seed), player_count=int(player_count), max_steps=max_steps)
+            for game_seed, player_count in zip(game_seeds, player_counts, strict=True)
+        ]
+
     if workers <= 1:
-        for job in jobs:
-            _consume(_play_one_bot_game(job))
+        while len(samples) < target_samples:
+            for job in _next_batch_jobs():
+                _consume(_play_one_bot_game(job))
     else:
         with ProcessPoolExecutor(max_workers=workers) as pool:
-            for episode_samples in pool.map(_play_one_bot_game, jobs):
-                _consume(episode_samples)
+            while len(samples) < target_samples:
+                for episode_samples in pool.map(_play_one_bot_game, _next_batch_jobs()):
+                    _consume(episode_samples)
 
-    return samples, failed_games
+    return samples, failed_games, games_played
 
 
 def save_replay_samples(samples: Sequence[ReplaySample], path: str | Path) -> None:

@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import pickle
 
 import torch
 
@@ -117,6 +118,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-dir", default="scripts/output/checkpoints/default")
     parser.add_argument("--checkpoint-every", type=int, default=1, help="iterations between checkpoint writes")
     parser.add_argument("--resume", help="path to a checkpoint (e.g. .../latest.pt) to resume from")
+    parser.add_argument(
+        "--seed-buffer-from",
+        help="path to a pickled list[ReplaySample] (e.g. a bootstrap dataset.pkl) to preload into the "
+        "replay buffer before self-play starts, up to --buffer-capacity. The buffer is a FIFO ring "
+        "(see ReplayBuffer.add), so these samples get evicted oldest-first as self-play adds new ones "
+        "- a gradual ramp from imitation data to self-play data instead of iteration 1 training on "
+        "nothing but that iteration's own small, narrow self-play batch.",
+    )
     parser.add_argument("--log-dir", default="scripts/output/runs/default")
     parser.add_argument(
         "--eval-every",
@@ -197,12 +206,20 @@ def main() -> None:
         start_state = LoopState(iteration=loaded.iteration, total_train_steps=loaded.total_train_steps)
         print(f"resumed from {args.resume} at iteration {loaded.iteration} ({loaded.total_train_steps} train steps so far)")
 
+    initial_samples = None
+    if args.seed_buffer_from:
+        with open(args.seed_buffer_from, "rb") as f:
+            initial_samples = pickle.load(f)
+        print(f"seeding replay buffer with {min(len(initial_samples), args.buffer_capacity)} of {len(initial_samples)} samples from {args.seed_buffer_from}")
+
     with MetricsLogger(args.log_dir) as metrics:
         print(
             f"training for {config.iterations - start_state.iteration} more iteration(s) "
             f"(starting at {start_state.iteration}); tensorboard={'on' if metrics.tensorboard_available else 'off'}"
         )
-        _, final_state = run_training_loop(config, metrics, net=net, optimizer=optimizer, start_state=start_state)
+        _, final_state = run_training_loop(
+            config, metrics, net=net, optimizer=optimizer, start_state=start_state, initial_samples=initial_samples
+        )
         print(f"finished at iteration {final_state.iteration} ({final_state.total_train_steps} total train steps)")
 
 

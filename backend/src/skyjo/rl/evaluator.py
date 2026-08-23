@@ -24,7 +24,9 @@ across turns the same way `MctsBot` does live play - both share `rl.mcts
 from __future__ import annotations
 
 from collections.abc import MutableMapping, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import torch
@@ -51,6 +53,7 @@ from skyjo.rl.mcts import (
     advance_cached_root,
     greedy_action,
     run_mcts,
+    run_mcts_batch,
 )
 from skyjo.rl.network import AlphaZeroNet
 from skyjo.rl.selfplay import (
@@ -269,6 +272,149 @@ def _play_one_eval_game(
     return final_ranks(state.total_scores)[net_seat], state.total_scores[net_seat]
 
 
+def _play_eval_games_batch(
+    evaluate_batch: BatchEvaluateFn,
+    *,
+    net_seats: Sequence[int],
+    seeds: Sequence[int],
+    num_simulations: int,
+    c_puct: float,
+    max_steps: int,
+    round_max_steps: int,
+    max_rounds: int,
+) -> list[tuple[int, int]]:
+    """Batched sibling of `_play_one_eval_game`: plays `len(seeds)` 2-player
+    net-vs-`HeuristicBot` games concurrently, batching every decision round's
+    net-controlled leaf evaluations into one `evaluate_batch` call via
+    `run_mcts_batch` - mirrors `rl.selfplay.generate_episodes_batch`, the
+    self-play sibling this is modeled on (same "resolve round_over/force-close
+    before this round's turn, then batch the still-active decisions" shape).
+
+    Unlike `_play_one_eval_game`, there's no cached-root tree reuse across a
+    game's own turns: `run_mcts_batch` has no `reuse_root` support (batched
+    self-play doesn't use it either - see `generate_episodes_batch`'s
+    docstring), so every net decision here is a fresh root. That's the same
+    throughput-over-reuse tradeoff batching already makes elsewhere, not a
+    new one introduced here.
+
+    `max_steps` bounds the number of decision *rounds* (each round advances
+    every still-active game by exactly one decision), not raw loop
+    iterations the way `_play_one_eval_game`'s `max_steps` does - same
+    distinction `generate_episodes_batch` documents.
+
+    Returns (net's final rank, net's final points) per game, in `seeds` order.
+    """
+    from skyjo.bots.heuristic_bot import (
+        HeuristicBot,  # deferred to dodge a circular import, see module docstring
+    )
+
+    n = len(seeds)
+    heuristic_bots = [HeuristicBot(seed=seed) for seed in seeds]
+    rngs = [np.random.default_rng(seed) for seed in seeds]
+    states = [new_match(player_count=2, seed=seed) for seed in seeds]
+    finished = [False] * n
+    round_steps = [0] * n
+    round_counts = [0] * n
+
+    for _ in range(max_steps):
+        for i in range(n):
+            if finished[i]:
+                continue
+            while True:
+                if states[i].phase == "round_over":
+                    round_counts[i] += 1
+                    if round_counts[i] >= max_rounds:
+                        finished[i] = True
+                        break
+                    states[i] = start_next_round(states[i])
+                    round_steps[i] = 0
+                    continue
+                if states[i].phase == "game_over":
+                    finished[i] = True
+                    break
+                if round_steps[i] >= round_max_steps:
+                    states[i] = force_close_round(states[i])
+                    round_steps[i] = 0
+                    continue
+                break
+
+        active = [i for i in range(n) if not finished[i]]
+        if not active:
+            break
+
+        turns = {i: Turn.from_state(states[i]) for i in active}
+        net_active = [i for i in active if turns[i].acting_player == net_seats[i]]
+        heuristic_active = [i for i in active if turns[i].acting_player != net_seats[i]]
+
+        for i in heuristic_active:
+            action = heuristic_bots[i].choose_action(turns[i])
+            states[i] = apply_action(states[i], action)
+            round_steps[i] += 1
+
+        if net_active:
+            roots = run_mcts_batch(
+                [turns[i] for i in net_active],
+                evaluate_batch,
+                num_simulations=num_simulations,
+                c_puct=c_puct,
+                add_root_noise=False,
+                rngs=[rngs[i] for i in net_active],
+            )
+            for i, root in zip(net_active, roots, strict=True):
+                action = greedy_action(root, rngs[i])
+                states[i] = apply_action(states[i], action)
+                round_steps[i] += 1
+    else:
+        unfinished = sum(1 for f in finished if not f)
+        raise RuntimeError(
+            f"_play_eval_games_batch: {unfinished} of {n} games did not reach game_over "
+            f"within {max_steps} decision rounds"
+        )
+
+    return [
+        (final_ranks(states[i].total_scores)[net_seats[i]], states[i].total_scores[net_seats[i]])
+        for i in range(n)
+    ]
+
+
+@dataclass(frozen=True)
+class _EvalBatchJob:
+    seeds: tuple[int, ...]
+    net_seats: tuple[int, ...]
+    num_simulations: int
+    c_puct: float
+    max_steps: int
+    round_max_steps: int
+    max_rounds: int
+
+
+# Set by `_init_eval_worker` in a subprocess - see `evaluate_vs_heuristic`'s
+# `workers > 1` path, mirrors `rl.loop`'s `_worker_evaluate_batch`.
+_eval_worker_evaluate_batch: BatchEvaluateFn | None = None
+
+
+def _init_eval_worker(state_dict: dict[str, torch.Tensor], network_kwargs: dict[str, Any]) -> None:
+    global _eval_worker_evaluate_batch
+    net = AlphaZeroNet(**network_kwargs)
+    net.load_state_dict(state_dict)
+    _eval_worker_evaluate_batch = make_batch_network_evaluator(net)
+
+
+def _play_eval_batch_job(job: _EvalBatchJob) -> list[tuple[int, int]]:
+    if _eval_worker_evaluate_batch is None:
+        raise RuntimeError("_play_eval_batch_job: worker was not initialized via _init_eval_worker")
+    return _play_eval_games_batch(
+        _eval_worker_evaluate_batch,
+        net_seats=job.net_seats,
+        seeds=job.seeds,
+        num_simulations=job.num_simulations,
+        c_puct=job.c_puct,
+        max_steps=job.max_steps,
+        round_max_steps=job.round_max_steps,
+        max_rounds=job.max_rounds,
+    )
+
+
 def evaluate_vs_heuristic(
     net: AlphaZeroNet,
     num_games: int,
@@ -279,6 +425,9 @@ def evaluate_vs_heuristic(
     round_max_steps: int = DEFAULT_ROUND_MAX_STEPS,
     max_rounds: int = DEFAULT_MAX_ROUNDS,
     seed: int = 0,
+    workers: int = 0,
+    eval_batch_size: int = 1,
+    network_kwargs: dict[str, Any] | None = None,
 ) -> HeuristicEvalResult:
     """Plays `net`-driven MCTS against `HeuristicBot` for `num_games`
     2-player games, alternating which seat the network takes so neither
@@ -288,26 +437,84 @@ def evaluate_vs_heuristic(
     same `seed` replay the exact same game set regardless of the net's
     weights, so results across training iterations reflect the net actually
     improving (or not), not a different random sample of games each time.
+
+    `eval_batch_size <= 1` (default) is the original path: one game at a
+    time, each with its own tree-reuse across turns (`_play_one_eval_game`).
+    `eval_batch_size > 1` groups games into batches of this many, played
+    concurrently via `_play_eval_games_batch` so every decision round's net
+    evaluations across the group become one batched network call instead of
+    one per game - at the cost of no tree reuse within a game (see that
+    function's docstring). `workers` shards those groups across processes
+    exactly as `rl.loop`'s self-play does, requiring `network_kwargs` (the
+    `AlphaZeroNet` constructor kwargs `net` was built with) so each worker
+    can reconstruct the network from a plain state dict.
     """
     if num_games <= 0:
         raise ValueError("evaluate_vs_heuristic: num_games must be > 0")
+    if eval_batch_size < 1:
+        raise ValueError("evaluate_vs_heuristic: eval_batch_size must be >= 1")
+    if workers < 0:
+        raise ValueError("evaluate_vs_heuristic: workers must be >= 0")
 
-    evaluate = make_network_evaluator(net)
-    ranks: list[int] = []
-    points: list[int] = []
-    for g in range(num_games):
-        rank, game_points = _play_one_eval_game(
-            evaluate,
-            net_seat=g % 2,
-            seed=seed + g,
-            num_simulations=num_simulations,
-            c_puct=c_puct,
-            max_steps=max_steps,
-            round_max_steps=round_max_steps,
-            max_rounds=max_rounds,
-        )
-        ranks.append(rank)
-        points.append(game_points)
+    if eval_batch_size <= 1 and workers <= 1:
+        evaluate = make_network_evaluator(net)
+        ranks: list[int] = []
+        points: list[int] = []
+        for g in range(num_games):
+            rank, game_points = _play_one_eval_game(
+                evaluate,
+                net_seat=g % 2,
+                seed=seed + g,
+                num_simulations=num_simulations,
+                c_puct=c_puct,
+                max_steps=max_steps,
+                round_max_steps=round_max_steps,
+                max_rounds=max_rounds,
+            )
+            ranks.append(rank)
+            points.append(game_points)
+    else:
+        seeds = [seed + g for g in range(num_games)]
+        net_seats = [g % 2 for g in range(num_games)]
+        jobs = [
+            _EvalBatchJob(
+                seeds=tuple(seeds[start : start + eval_batch_size]),
+                net_seats=tuple(net_seats[start : start + eval_batch_size]),
+                num_simulations=num_simulations,
+                c_puct=c_puct,
+                max_steps=max_steps,
+                round_max_steps=round_max_steps,
+                max_rounds=max_rounds,
+            )
+            for start in range(0, num_games, eval_batch_size)
+        ]
+
+        if workers <= 1:
+            evaluate_batch = make_batch_network_evaluator(net)
+            group_results = [
+                _play_eval_games_batch(
+                    evaluate_batch,
+                    net_seats=job.net_seats,
+                    seeds=job.seeds,
+                    num_simulations=job.num_simulations,
+                    c_puct=job.c_puct,
+                    max_steps=job.max_steps,
+                    round_max_steps=job.round_max_steps,
+                    max_rounds=job.max_rounds,
+                )
+                for job in jobs
+            ]
+        else:
+            if network_kwargs is None:
+                raise ValueError("evaluate_vs_heuristic: network_kwargs is required when workers > 1")
+            state_dict = {k: v.detach().cpu() for k, v in net.state_dict().items()}
+            with ProcessPoolExecutor(
+                max_workers=workers, initializer=_init_eval_worker, initargs=(state_dict, network_kwargs)
+            ) as pool:
+                group_results = list(pool.map(_play_eval_batch_job, jobs))
+
+        ranks = [rank for group in group_results for rank, _ in group]
+        points = [game_points for group in group_results for _, game_points in group]
 
     return HeuristicEvalResult(
         games_played=num_games,

@@ -324,6 +324,68 @@ def test_evaluate_vs_heuristic_rejects_non_positive_num_games():
         evaluate_vs_heuristic(_tiny_net(), 0, num_simulations=2)
 
 
+def test_evaluate_vs_heuristic_rejects_non_positive_eval_batch_size():
+    with pytest.raises(ValueError):
+        evaluate_vs_heuristic(_tiny_net(), 2, num_simulations=2, eval_batch_size=0)
+
+
+def test_evaluate_vs_heuristic_rejects_negative_workers():
+    with pytest.raises(ValueError):
+        evaluate_vs_heuristic(_tiny_net(), 2, num_simulations=2, workers=-1)
+
+
+def test_evaluate_vs_heuristic_requires_network_kwargs_when_workers_greater_than_one():
+    with pytest.raises(ValueError):
+        evaluate_vs_heuristic(_tiny_net(), 2, num_simulations=2, workers=2, eval_batch_size=1)
+
+
+# --- evaluate_vs_heuristic: batched path (eval_batch_size > 1) --------------
+
+
+def test_evaluate_vs_heuristic_batched_plays_the_requested_number_of_games():
+    result = evaluate_vs_heuristic(
+        _tiny_net(), 5, num_simulations=2, max_steps=2000, seed=0, eval_batch_size=2
+    )
+
+    assert result.games_played == 5
+    assert 0.0 <= result.win_rate <= 1.0
+    assert 0.0 <= result.avg_rank <= 1.0
+
+
+def test_evaluate_vs_heuristic_batched_is_deterministic_for_the_same_seed_and_weights():
+    net = _tiny_net()
+
+    first = evaluate_vs_heuristic(net, 4, num_simulations=2, max_steps=2000, seed=5, eval_batch_size=3)
+    second = evaluate_vs_heuristic(net, 4, num_simulations=2, max_steps=2000, seed=5, eval_batch_size=3)
+
+    assert first == second
+
+
+def test_evaluate_vs_heuristic_batched_raises_if_a_game_exceeds_max_steps():
+    with pytest.raises(RuntimeError):
+        evaluate_vs_heuristic(_tiny_net(), 2, num_simulations=1, max_steps=1, seed=0, eval_batch_size=2)
+
+
+# --- evaluate_vs_heuristic: workers > 1 (subprocess pool) --------------------
+
+
+def test_evaluate_vs_heuristic_with_workers_plays_the_requested_number_of_games():
+    network_kwargs = {"trunk_dim": 16, "num_residual_blocks": 1}
+    result = evaluate_vs_heuristic(
+        _tiny_net(),
+        4,
+        num_simulations=2,
+        max_steps=2000,
+        seed=0,
+        eval_batch_size=2,
+        workers=2,
+        network_kwargs=network_kwargs,
+    )
+
+    assert result.games_played == 4
+    assert 0.0 <= result.win_rate <= 1.0
+
+
 # --- evaluate_vs_heuristic: round_max_steps / max_rounds --------------------
 
 
