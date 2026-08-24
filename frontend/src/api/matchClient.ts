@@ -39,6 +39,10 @@ export function createMatch(newMatch: NewMatchRequest): Promise<MatchStateOut> {
   return apiRequest<MatchStateOut>('/matches', { method: 'POST', body: JSON.stringify(newMatch) })
 }
 
+export function getMctsModels(): Promise<string[]> {
+  return apiRequest<string[]>('/matches/mcts-models')
+}
+
 export function getMatch(matchId: string): Promise<MatchStateOut> {
   return apiRequest<MatchStateOut>(`/matches/${matchId}`)
 }
@@ -60,4 +64,11 @@ export function getMatchHistory(matchId: string): Promise<MatchHistoryOut> {
 
 export function gotoMatchHistoryNode(matchId: string, nodeId: string): Promise<MatchStateOut> {
   return apiRequest<MatchStateOut>(`/matches/${matchId}/history/${nodeId}/goto`, { method: 'POST' })
+}
+
+// Untyped: this is the same schema-less `tree_export.tree_to_dict` shape
+// `tools/mcts-tree` already parses defensively (see treeParse.ts) rather than
+// trusts — no reason to duplicate that structural typing here too.
+export function getMctsTree(matchId: string, nodeId: string): Promise<unknown> {
+  return apiRequest<unknown>(`/matches/${matchId}/history/${nodeId}/mcts-tree`)
 }

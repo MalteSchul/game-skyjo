@@ -1,5 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, applyAction, createMatch, getMatch, getMatchHistory, gotoMatchHistoryNode, startNextRound } from './matchClient'
+import {
+  ApiError,
+  applyAction,
+  createMatch,
+  getMatch,
+  getMatchHistory,
+  getMctsModels,
+  gotoMatchHistoryNode,
+  startNextRound,
+} from './matchClient'
 import type { MatchHistoryOut, MatchStateOut } from './types'
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -54,6 +63,12 @@ describe('matchClient', () => {
     await expect(getMatch('abc123')).resolves.toEqual(MATCH)
   })
 
+  it('fetches the list of selectable mcts models (happy path)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(['strong', 'weak'])))
+
+    await expect(getMctsModels()).resolves.toEqual(['strong', 'weak'])
+  })
+
   it('raises an ApiError with the backend detail on an illegal action (sad path)', async () => {
     vi.stubGlobal(
       'fetch',
@@ -83,7 +98,7 @@ describe('matchClient', () => {
     const history: MatchHistoryOut = {
       head_id: 'n1',
       nodes: [
-        { node_id: 'n1', parent_id: null, seq: 0, round_index: 0, actor: null, current_player: 0, phase: 'initial_flip', edge: { kind: 'root', action_type: null, position: null } },
+        { node_id: 'n1', parent_id: null, seq: 0, round_index: 0, actor: null, current_player: 0, phase: 'initial_flip', edge: { kind: 'root', action_type: null, position: null }, has_mcts_tree: false },
       ],
     }
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(history)))

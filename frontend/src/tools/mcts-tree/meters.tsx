@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react'
-import { fmtSigned } from './treeUtils'
+import { fmtPct, fmtSigned } from './treeUtils'
 
 /** A value in roughly [-1, 1] as a bar growing from a center baseline —
  * green to the right (favors whoever this is drawn for), red to the left.
@@ -46,10 +46,15 @@ export function PlayerValueStrip({ values, currentPlayer }: { values: number[]; 
   )
 }
 
-export function PlayerBadge({ index }: { index: number }) {
+/** `winRate`, when given, is P(this player finishes rank 0) — i.e. wins the
+ * round — from the node's `rank_probs`; shown as a percentage appended to the
+ * badge, behind the "show win %" view setting since it's only available once
+ * `--network` populated `rank_probs` (see `ValuePanel`). */
+export function PlayerBadge({ index, winRate }: { index: number; winRate?: number }) {
   return (
     <span className="mtx-pill mtx-pill-player" style={{ background: `var(--mtx-player-${index % 8})` }}>
       P{index}
+      {winRate !== undefined && <span className="mtx-pill-winrate">{fmtPct(winRate, 0)}</span>}
     </span>
   )
 }

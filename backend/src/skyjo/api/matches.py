@@ -15,7 +15,9 @@ from skyjo.api.store import (
     MatchStore,
     NodeNotFoundError,
 )
+from skyjo.bots.base import ExposesSearchTree
 from skyjo.bots.factory import create_bot
+from skyjo.bots.mcts_bot import list_available_models
 from skyjo.domain.engine import (
     Action,
     GameState,
@@ -42,6 +44,14 @@ MAX_BOT_AUTOPLAY_STEPS = 2000
 AUTOPLAY_GRACE_SECONDS = 0.2
 
 
+@router.get("/mcts-models", response_model=list[str])
+def get_mcts_models() -> list[str]:
+    """Names selectable as an mcts_bot seat's `player_mcts_models` entry - see
+    `bots.mcts_bot.list_available_models`. Registered ahead of the
+    "/{match_id}" GET route so "mcts-models" isn't parsed as a match id."""
+    return list_available_models()
+
+
 @router.post("", response_model=MatchStateOut, status_code=201)
 def create_match(request: NewMatchRequest) -> MatchStateOut:
     try:
@@ -51,10 +61,20 @@ def create_match(request: NewMatchRequest) -> MatchStateOut:
 
     player_names = _resolve_player_names(request.player_names, request.player_count)
     player_types = _resolve_player_types(request.player_types, request.player_count)
-    bots = tuple(
-        create_bot(player_type, seed=None if request.seed is None else request.seed + i)
-        for i, player_type in enumerate(player_types)
-    )
+    mcts_models = _resolve_mcts_models(request.player_mcts_models, request.player_count)
+    mcts_num_simulations = _resolve_mcts_num_simulations(request.player_mcts_num_simulations, request.player_count)
+    try:
+        bots = tuple(
+            create_bot(
+                player_type,
+                seed=None if request.seed is None else request.seed + i,
+                mcts_model=mcts_models[i],
+                num_simulations=mcts_num_simulations[i],
+            )
+            for i, player_type in enumerate(player_types)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     match_id = store.create(state, player_names, player_types, bots)
     node, player_names, player_types, status = _trigger_and_await(match_id)
     return MatchStateOut.from_state(match_id, node.state, player_names, player_types, status)
@@ -99,6 +119,25 @@ def start_match_next_round(match_id: str) -> MatchStateOut:
         raise HTTPException(status_code=409, detail="match is busy: a bot is still deciding") from exc
 
     return MatchStateOut.from_state(match_id, node.state, player_names, player_types, status)
+
+
+@router.get("/{match_id}/history/{node_id}/mcts-tree")
+def get_history_node_mcts_tree(match_id: str, node_id: str) -> dict:
+    """The search tree behind `node_id`'s move (see `MatchNode.mcts_tree`),
+    captured back when that node was created - so this reflects whichever
+    move that was at the time, not whatever the bot happens to be searching
+    right now. Lets the history panel show the tree for any past bot move,
+    not just the current head. 404s for an unknown match/node, a human move,
+    or a bot with no real search (e.g. HeuristicBot)."""
+    try:
+        node = store.get_node(match_id, node_id)
+    except MatchNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"match {match_id!r} not found") from exc
+    except NodeNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"history node {node_id!r} not found") from exc
+    if node.mcts_tree is None:
+        raise HTTPException(status_code=404, detail=f"history node {node_id!r} has no search tree")
+    return node.mcts_tree
 
 
 @router.get("/{match_id}/history", response_model=MatchHistoryOut)
@@ -165,11 +204,17 @@ def _run_autoplay_loop(match_id: str) -> None:
         store.set_thinking(match_id, node.state.current_player)
         turn = Turn.from_state(node.state)
         action = bot.choose_action(turn, report_progress=lambda p: store.set_thinking_progress(match_id, p))
+        # Captured here, right as this decision is made - not after
+        # apply_autoplay_action returns, since observe_transition (called for
+        # every seat's bot as part of that) walks a cached MCTS root forward
+        # past this exact search the moment the move is applied (see
+        # MctsBot.last_tree_snapshots's docstring).
+        mcts_tree = bot.last_tree_snapshots() if isinstance(bot, ExposesSearchTree) else None
 
         def compute(state: GameState, action: Action = action) -> GameState:
             return apply_action(state, action)
 
-        node, _player_names, _player_types = store.apply_autoplay_action(match_id, action, compute)
+        node, _player_names, _player_types = store.apply_autoplay_action(match_id, action, compute, mcts_tree=mcts_tree)
 
     raise RuntimeError(f"bot auto-play exceeded {MAX_BOT_AUTOPLAY_STEPS} steps for match {match_id!r}")
 
@@ -195,3 +240,41 @@ def _resolve_player_types(types: list[str] | None, player_count: int) -> tuple[s
             detail=f"player_types must have exactly player_count ({player_count}) entries",
         )
     return tuple(types)
+
+
+def _resolve_mcts_models(models: list[str | None] | None, player_count: int) -> tuple[str | None, ...]:
+    if models is None:
+        return tuple(None for _ in range(player_count))
+    if len(models) != player_count:
+        raise HTTPException(
+            status_code=400,
+            detail=f"player_mcts_models must have exactly player_count ({player_count}) entries",
+        )
+    return tuple(models)
+
+
+# Keeps a misconfigured seat from making a request block indefinitely or
+# pegging the CPU - not a claim that either bound is a strong/fast search, just
+# a sane outer fence around what the UI's number input allows.
+MIN_MCTS_NUM_SIMULATIONS = 1
+MAX_MCTS_NUM_SIMULATIONS = 1_000_000
+
+
+def _resolve_mcts_num_simulations(values: list[int | None] | None, player_count: int) -> tuple[int | None, ...]:
+    if values is None:
+        return tuple(None for _ in range(player_count))
+    if len(values) != player_count:
+        raise HTTPException(
+            status_code=400,
+            detail=f"player_mcts_num_simulations must have exactly player_count ({player_count}) entries",
+        )
+    for value in values:
+        if value is not None and not (MIN_MCTS_NUM_SIMULATIONS <= value <= MAX_MCTS_NUM_SIMULATIONS):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"player_mcts_num_simulations entries must be between {MIN_MCTS_NUM_SIMULATIONS} "
+                    f"and {MAX_MCTS_NUM_SIMULATIONS}, got {value}"
+                ),
+            )
+    return tuple(values)

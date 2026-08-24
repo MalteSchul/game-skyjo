@@ -1,4 +1,5 @@
 import json
+import pickle
 
 import numpy as np
 import pytest
@@ -65,6 +66,16 @@ def test_training_config_accepts_valid_values():
 def test_training_config_rejects_invalid_values(overrides):
     with pytest.raises(ValueError):
         _tiny_config(**overrides)
+
+
+def test_training_config_rejects_unknown_selfplay_opponent():
+    with pytest.raises(ValueError):
+        _tiny_config(selfplay_opponent="bogus")
+
+
+def test_training_config_rejects_heuristic_opponent_with_non_two_player():
+    with pytest.raises(ValueError):
+        _tiny_config(selfplay_opponent="heuristic", min_players=2, max_players=3)
 
 
 # --- round_max_steps/max_rounds wiring --------------------------------------
@@ -211,6 +222,29 @@ def test_run_training_loop_writes_resumable_checkpoints(tmp_path):
         assert torch.equal(trained_param, resumed_param)
 
 
+def test_run_training_loop_saves_buffer_alongside_checkpoint(tmp_path, monkeypatch):
+    monkeypatch.setattr(loop_module, "generate_episode", lambda *a, **k: [])
+    seed_samples = _dummy_replay_samples(n_act=2, count=50)
+    config = _tiny_config(
+        checkpoint_dir=str(tmp_path / "checkpoints"),
+        checkpoint_every=1,
+        buffer_capacity=50,
+        batch_size=50,
+        train_steps_per_iteration=1,
+        iterations=1,
+    )
+
+    with MetricsLogger(tmp_path / "logs") as metrics:
+        run_training_loop(config, metrics, initial_samples=seed_samples)
+
+    buffer_path = tmp_path / "checkpoints" / "buffer_latest.pkl"
+    assert buffer_path.exists()
+    with open(buffer_path, "rb") as f:
+        saved_samples = pickle.load(f)
+    assert len(saved_samples) == 50
+    assert all(isinstance(s, ReplaySample) for s in saved_samples)
+
+
 def test_run_training_loop_resumes_from_a_given_start_state(tmp_path):
     config = _tiny_config(iterations=3)
 
@@ -335,6 +369,59 @@ def test_run_training_loop_with_selfplay_batch_size_one_matches_default_behavior
         _, final_state = run_training_loop(config, metrics)
 
     assert final_state.iteration == 1
+
+
+# --- run_training_loop: self-play vs a fixed heuristic opponent -------------
+
+
+def test_run_training_loop_vs_heuristic_produces_samples_and_trains(tmp_path):
+    config = _tiny_config(games_per_iteration=2, selfplay_opponent="heuristic", iterations=1)
+
+    with MetricsLogger(tmp_path / "logs") as metrics:
+        _, final_state = run_training_loop(config, metrics)
+
+    assert final_state.iteration == 1
+    record = json.loads((tmp_path / "logs" / "metrics.jsonl").read_text().splitlines()[0])
+    assert record["self_play/failed_games"] == 0
+    assert record["self_play/samples_generated"] > 0
+
+
+def test_run_training_loop_vs_heuristic_alternates_net_seat(tmp_path, monkeypatch):
+    seen_net_seats = []
+    original = loop_module.generate_episode_vs_bot
+
+    def spy(initial_state, evaluate, opponent_choose_action, net_seat, **kwargs):
+        seen_net_seats.append(net_seat)
+        return original(initial_state, evaluate, opponent_choose_action, net_seat, **kwargs)
+
+    monkeypatch.setattr(loop_module, "generate_episode_vs_bot", spy)
+    config = _tiny_config(games_per_iteration=4, selfplay_opponent="heuristic", iterations=1)
+
+    with MetricsLogger(tmp_path / "logs") as metrics:
+        run_training_loop(config, metrics)
+
+    assert seen_net_seats == [0, 1, 0, 1]
+
+
+def test_run_training_loop_vs_heuristic_with_multiple_workers_produces_samples(tmp_path):
+    config = _tiny_config(games_per_iteration=2, selfplay_opponent="heuristic", workers=2, iterations=1)
+
+    with MetricsLogger(tmp_path / "logs") as metrics:
+        _, final_state = run_training_loop(config, metrics)
+
+    assert final_state.iteration == 1
+
+
+def test_run_training_loop_vs_random_produces_samples_and_trains(tmp_path):
+    config = _tiny_config(games_per_iteration=2, selfplay_opponent="random", iterations=1)
+
+    with MetricsLogger(tmp_path / "logs") as metrics:
+        _, final_state = run_training_loop(config, metrics)
+
+    assert final_state.iteration == 1
+    record = json.loads((tmp_path / "logs" / "metrics.jsonl").read_text().splitlines()[0])
+    assert record["self_play/failed_games"] == 0
+    assert record["self_play/samples_generated"] > 0
 
 
 def test_run_training_loop_batched_selfplay_survives_a_whole_group_failing(tmp_path, monkeypatch):

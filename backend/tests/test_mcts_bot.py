@@ -4,7 +4,14 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from skyjo.bots.mcts_bot import CHECKPOINT_PATH_ENV_VAR, MctsBot, default_evaluator
+from skyjo.bots.mcts_bot import (
+    CHECKPOINT_PATH_ENV_VAR,
+    MODELS_DIR_ENV_VAR,
+    MctsBot,
+    default_evaluator,
+    evaluator_for_model,
+    list_available_models,
+)
 from skyjo.domain.engine import (
     Action,
     ActionType,
@@ -155,6 +162,50 @@ def test_default_evaluator_raises_for_a_bad_checkpoint_path(tmp_path, monkeypatc
             default_evaluator()
     finally:
         default_evaluator.cache_clear()
+
+
+# --- list_available_models() / evaluator_for_model() --------------------------
+
+
+def test_list_available_models_is_empty_when_models_dir_is_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv(MODELS_DIR_ENV_VAR, str(tmp_path / "does_not_exist"))
+
+    assert list_available_models() == []
+
+
+def test_list_available_models_lists_checkpoint_stems_sorted(tmp_path, monkeypatch):
+    save_checkpoint(tmp_path / "beta.pt", AlphaZeroNet(), None, iteration=1, total_train_steps=1)
+    save_checkpoint(tmp_path / "alpha.pt", AlphaZeroNet(), None, iteration=1, total_train_steps=1)
+    (tmp_path / "ignored.txt").write_text("not a checkpoint")
+    monkeypatch.setenv(MODELS_DIR_ENV_VAR, str(tmp_path))
+
+    assert list_available_models() == ["alpha", "beta"]
+
+
+def test_evaluator_for_model_loads_the_named_checkpoint(tmp_path, monkeypatch):
+    save_checkpoint(tmp_path / "alpha.pt", AlphaZeroNet(), None, iteration=1, total_train_steps=1)
+    monkeypatch.setenv(MODELS_DIR_ENV_VAR, str(tmp_path))
+    evaluator_for_model.cache_clear()
+
+    try:
+        evaluate = evaluator_for_model("alpha")
+        priors, value = evaluate(new_match(player_count=2, seed=1))
+    finally:
+        evaluator_for_model.cache_clear()
+
+    assert priors
+    assert value.shape == (2,)
+
+
+def test_evaluator_for_model_raises_for_an_unknown_model(tmp_path, monkeypatch):
+    monkeypatch.setenv(MODELS_DIR_ENV_VAR, str(tmp_path))
+    evaluator_for_model.cache_clear()
+
+    try:
+        with pytest.raises(ValueError):
+            evaluator_for_model("does-not-exist")
+    finally:
+        evaluator_for_model.cache_clear()
 
 
 # --- observe_transition: tree reuse --------------------------------------------

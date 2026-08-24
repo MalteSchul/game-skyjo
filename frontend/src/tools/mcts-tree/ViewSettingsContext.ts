@@ -8,9 +8,10 @@ import { createContext, useContext } from 'react'
 export interface ViewSettings {
   filterText: string
   hideZero: boolean
+  showWinRate: boolean
 }
 
-export const ViewSettingsContext = createContext<ViewSettings>({ filterText: '', hideZero: false })
+export const ViewSettingsContext = createContext<ViewSettings>({ filterText: '', hideZero: false, showWinRate: false })
 
 export function useViewSettings(): ViewSettings {
   return useContext(ViewSettingsContext)

@@ -13,13 +13,14 @@ function node(overrides: Partial<HistoryNodeOut>): HistoryNodeOut {
     current_player: 0,
     phase: 'initial_flip',
     edge: { kind: 'root', action_type: null, position: null },
+    has_mcts_tree: false,
     ...overrides,
   }
 }
 
 describe('HistoryPanel', () => {
   it('renders nothing when there is no history yet (bad path)', () => {
-    const { container } = render(<HistoryPanel history={null} playerNames={[]} onGoto={vi.fn()} busy={false} />)
+    const { container } = render(<HistoryPanel history={null} matchId="m0" playerNames={[]} onGoto={vi.fn()} busy={false} />)
 
     expect(container).toBeEmptyDOMElement()
   })
@@ -39,7 +40,7 @@ describe('HistoryPanel', () => {
       ],
     }
     const onGoto = vi.fn()
-    render(<HistoryPanel history={history} playerNames={['Ada', 'Grace']} onGoto={onGoto} busy={false} />)
+    render(<HistoryPanel history={history} matchId="m0" playerNames={['Ada', 'Grace']} onGoto={onGoto} busy={false} />)
 
     const panel = screen.getByLabelText('Match history')
     expect(within(panel).getByText('Game start')).toBeInTheDocument()
@@ -52,7 +53,7 @@ describe('HistoryPanel', () => {
   it('disables the entry for the current head instead of letting it be re-selected (sad path)', () => {
     const history: MatchHistoryOut = { head_id: 'n0', nodes: [node({ node_id: 'n0' })] }
     const onGoto = vi.fn()
-    render(<HistoryPanel history={history} playerNames={[]} onGoto={onGoto} busy={false} />)
+    render(<HistoryPanel history={history} matchId="m0" playerNames={[]} onGoto={onGoto} busy={false} />)
 
     const button = screen.getByRole('button', { name: 'Game start' })
     fireEvent.click(button)
@@ -82,7 +83,7 @@ describe('HistoryPanel', () => {
         }),
       ],
     }
-    render(<HistoryPanel history={history} playerNames={['Ada', 'Grace']} onGoto={vi.fn()} busy={false} />)
+    render(<HistoryPanel history={history} matchId="m0" playerNames={['Ada', 'Grace']} onGoto={vi.fn()} busy={false} />)
 
     const labels = screen.getAllByRole('button').map((btn) => btn.textContent)
     expect(labels).toEqual(['Grace flipped card 2', 'Ada flipped card 1', 'Game start'])
@@ -109,7 +110,7 @@ describe('HistoryPanel', () => {
         }),
       ],
     }
-    const { container } = render(<HistoryPanel history={history} playerNames={['Ada']} onGoto={vi.fn()} busy={false} />)
+    const { container } = render(<HistoryPanel history={history} matchId="m0" playerNames={['Ada']} onGoto={vi.fn()} busy={false} />)
 
     expect(screen.getByText('Ada flipped card 1')).toBeInTheDocument()
     expect(screen.getByText('Ada flipped card 2')).toBeInTheDocument()
@@ -138,7 +139,7 @@ describe('HistoryPanel', () => {
         node({ node_id: 'a4', parent_id: 'a3', seq: 40, actor: 0, edge: { kind: 'action', action_type: 'place', position: 5 } }),
       ],
     }
-    const { container } = render(<HistoryPanel history={history} playerNames={['Ada']} onGoto={vi.fn()} busy={false} />)
+    const { container } = render(<HistoryPanel history={history} matchId="m0" playerNames={['Ada']} onGoto={vi.fn()} busy={false} />)
 
     function laneLeftOf(text: string): string {
       const button = screen.getByText(text)
@@ -166,7 +167,7 @@ describe('HistoryPanel', () => {
       )
     }
     const history: MatchHistoryOut = { head_id: 'n14', nodes }
-    render(<HistoryPanel history={history} playerNames={['Ada']} onGoto={vi.fn()} busy={false} />)
+    render(<HistoryPanel history={history} matchId="m0" playerNames={['Ada']} onGoto={vi.fn()} busy={false} />)
 
     const panel = screen.getByLabelText('Match history')
     // Head (n14) ± 5 = rows for n9..n14 => 6 visible entries, 9 hidden below.
@@ -187,7 +188,7 @@ describe('HistoryPanel', () => {
       nodes.push(node({ node_id: `n${i}`, parent_id: `n${i - 1}`, seq: i, actor: 0, edge: { kind: 'action', action_type: 'draw_stock', position: null } }))
     }
     const history: MatchHistoryOut = { head_id: 'n12', nodes }
-    const { container } = render(<HistoryPanel history={history} playerNames={['Ada']} onGoto={vi.fn()} busy={false} />)
+    const { container } = render(<HistoryPanel history={history} matchId="m0" playerNames={['Ada']} onGoto={vi.fn()} busy={false} />)
 
     fireEvent.click(screen.getByRole('button', { name: 'View full history' }))
 
@@ -201,6 +202,28 @@ describe('HistoryPanel', () => {
     expect(document.body.contains(modal)).toBe(true)
   })
 
+  it('links to the tree viewer only for a node with a search tree, pointed at that node and match (happy path)', () => {
+    const history: MatchHistoryOut = {
+      head_id: 'n1',
+      nodes: [
+        node({ node_id: 'n0' }),
+        node({
+          node_id: 'n1',
+          parent_id: 'n0',
+          seq: 1,
+          actor: 0,
+          edge: { kind: 'action', action_type: 'draw_stock', position: null },
+          has_mcts_tree: true,
+        }),
+      ],
+    }
+    render(<HistoryPanel history={history} matchId="m0" playerNames={['Ada']} onGoto={vi.fn()} busy={false} />)
+
+    const treeLinks = screen.getAllByRole('link', { name: /search tree/ })
+    expect(treeLinks).toHaveLength(1)
+    expect(treeLinks[0]).toHaveAttribute('href', '/tools/mcts-tree?matchId=m0&nodeId=n1')
+  })
+
   it('closes the full-history popup without navigating when the backdrop is clicked (sad path)', () => {
     const nodes: HistoryNodeOut[] = [node({ node_id: 'n0', seq: 0 })]
     for (let i = 1; i <= 12; i++) {
@@ -208,7 +231,7 @@ describe('HistoryPanel', () => {
     }
     const history: MatchHistoryOut = { head_id: 'n12', nodes }
     const onGoto = vi.fn()
-    render(<HistoryPanel history={history} playerNames={['Ada']} onGoto={onGoto} busy={false} />)
+    render(<HistoryPanel history={history} matchId="m0" playerNames={['Ada']} onGoto={onGoto} busy={false} />)
 
     fireEvent.click(screen.getByRole('button', { name: 'View full history' }))
     expect(screen.getByRole('dialog', { name: 'Full match history' })).toBeInTheDocument()

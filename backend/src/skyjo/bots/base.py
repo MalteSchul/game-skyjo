@@ -38,3 +38,15 @@ class ObservesActions(Protocol):
     """
 
     def observe_transition(self, turn_before: Turn, action: Action, turn_after: Turn) -> None: ...
+
+
+@runtime_checkable
+class ExposesSearchTree(Protocol):
+    """Optional `Bot` extension for one that can export the search tree(s)
+    behind its most recent decision, e.g. `MctsBot` (see
+    `rl.tree_export.tree_to_dict`) - for a "why did it pick this" UI, not
+    anything the bot itself needs. A bot with no real search (`HeuristicBot`,
+    `RandomBot`) simply never implements it.
+    """
+
+    def last_tree_snapshots(self) -> dict[str, dict] | None: ...

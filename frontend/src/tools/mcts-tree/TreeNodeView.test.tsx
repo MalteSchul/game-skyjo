@@ -57,10 +57,18 @@ const ROOT: DecisionNode = {
  * version of this tool got wrong (toggled a class with no matching CSS
  * rule, so individual rows silently did nothing while "expand all" still
  * worked, because it touched a different element). */
-function Harness({ filterText = '', hideZero = false }: { filterText?: string; hideZero?: boolean }) {
+function Harness({
+  filterText = '',
+  hideZero = false,
+  showWinRate = false,
+}: {
+  filterText?: string
+  hideZero?: boolean
+  showWinRate?: boolean
+}) {
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set())
   return (
-    <ViewSettingsContext.Provider value={{ filterText, hideZero }}>
+    <ViewSettingsContext.Provider value={{ filterText, hideZero, showWinRate }}>
       <NodeBlock
         node={ROOT}
         compareNode={null}

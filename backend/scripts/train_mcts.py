@@ -6,20 +6,24 @@ for a real, long-running run.
 
 Usage:
   uv run python scripts/train_mcts.py --iterations 200 --games-per-iteration 20 \
-      --num-simulations 200 --workers 4 --log-dir scripts/output/runs/run1 \
-      --checkpoint-dir scripts/output/checkpoints/run1
+      --num-simulations 200 --workers 4 --run-dir scripts/output/runs/run1
+
+  --run-dir keeps one run's checkpoints and metrics together, under
+  <run-dir>/checkpoints and <run-dir>/metrics respectively - the older
+  --checkpoint-dir/--log-dir pair (still supported, ignored when --run-dir is
+  set) names those two independently and scatters a run's own output across
+  two separately-named trees.
 
 Resume a stopped/crashed run from its latest checkpoint:
-  uv run python scripts/train_mcts.py --resume scripts/output/checkpoints/run1/latest.pt \
-      --log-dir scripts/output/runs/run1 --checkpoint-dir scripts/output/checkpoints/run1 \
-      [... same other flags as the original run ...]
+  uv run python scripts/train_mcts.py --resume scripts/output/runs/run1/checkpoints/latest.pt \
+      --run-dir scripts/output/runs/run1 [... same other flags as the original run ...]
 
 Watch live metrics while a run is in progress:
-  uv run tensorboard --logdir scripts/output/runs/run1
-  (or tail -f scripts/output/runs/run1/metrics.jsonl - written even without tensorboard)
+  uv run tensorboard --logdir scripts/output/runs/run1/metrics
+  (or tail -f scripts/output/runs/run1/metrics/metrics.jsonl - written even without tensorboard)
 
 Point a live mcts_bot at the result (see skyjo.bots.mcts_bot):
-  SKYJO_MCTS_CHECKPOINT_PATH=scripts/output/checkpoints/run1/latest.pt uv run uvicorn skyjo.api:app
+  SKYJO_MCTS_CHECKPOINT_PATH=scripts/output/runs/run1/checkpoints/latest.pt uv run uvicorn skyjo.api:app
 
 Self-play throughput (--workers / --selfplay-batch-size):
   Batching MCTS leaf evaluations (--selfplay-batch-size > 1) amortizes the
@@ -115,16 +119,31 @@ def _parse_args() -> argparse.Namespace:
         "docstring for the resilience caveat.",
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--run-dir",
+        help="one folder for this run's whole output: checkpoints go to <run-dir>/checkpoints, metrics/"
+        "tensorboard to <run-dir>/metrics - the checkpoint-dir/log-dir split below otherwise scatters a "
+        "run's own artifacts across two independently-named trees. Takes precedence over --checkpoint-dir/"
+        "--log-dir when set; leave unset for the old two-flag layout (kept for scripts, like "
+        "run_bootstrap_pipeline.py, that already name those two paths themselves).",
+    )
     parser.add_argument("--checkpoint-dir", default="scripts/output/checkpoints/default")
     parser.add_argument("--checkpoint-every", type=int, default=1, help="iterations between checkpoint writes")
-    parser.add_argument("--resume", help="path to a checkpoint (e.g. .../latest.pt) to resume from")
+    parser.add_argument(
+        "--resume",
+        help="path to a checkpoint (e.g. .../latest.pt) to resume from. If its directory has a "
+        "buffer_latest.pkl (saved automatically alongside every checkpoint write), the replay buffer "
+        "is restored from it instead of starting empty.",
+    )
     parser.add_argument(
         "--seed-buffer-from",
         help="path to a pickled list[ReplaySample] (e.g. a bootstrap dataset.pkl) to preload into the "
         "replay buffer before self-play starts, up to --buffer-capacity. The buffer is a FIFO ring "
         "(see ReplayBuffer.add), so these samples get evicted oldest-first as self-play adds new ones "
         "- a gradual ramp from imitation data to self-play data instead of iteration 1 training on "
-        "nothing but that iteration's own small, narrow self-play batch.",
+        "nothing but that iteration's own small, narrow self-play batch. Ignored on --resume if that "
+        "checkpoint's directory has a buffer_latest.pkl (see --resume) - the actual buffer contents "
+        "take priority over re-seeding from scratch.",
     )
     parser.add_argument("--log-dir", default="scripts/output/runs/default")
     parser.add_argument(
@@ -166,6 +185,9 @@ def main() -> None:
     network_kwargs = {"trunk_dim": args.trunk_dim, "num_residual_blocks": args.residual_blocks}
     workers, selfplay_batch_size = _resolve_selfplay_concurrency(args)
 
+    checkpoint_dir = os.path.join(args.run_dir, "checkpoints") if args.run_dir else args.checkpoint_dir
+    log_dir = os.path.join(args.run_dir, "metrics") if args.run_dir else args.log_dir
+
     config = TrainingConfig(
         iterations=args.iterations,
         games_per_iteration=args.games_per_iteration,
@@ -189,7 +211,7 @@ def main() -> None:
         workers=workers,
         selfplay_batch_size=selfplay_batch_size,
         seed=args.seed,
-        checkpoint_dir=args.checkpoint_dir,
+        checkpoint_dir=checkpoint_dir,
         checkpoint_every=args.checkpoint_every,
         eval_every=args.eval_every,
         eval_games=args.eval_games,
@@ -207,12 +229,17 @@ def main() -> None:
         print(f"resumed from {args.resume} at iteration {loaded.iteration} ({loaded.total_train_steps} train steps so far)")
 
     initial_samples = None
-    if args.seed_buffer_from:
+    resumed_buffer_path = os.path.join(os.path.dirname(args.resume), "buffer_latest.pkl") if args.resume else None
+    if resumed_buffer_path and os.path.exists(resumed_buffer_path):
+        with open(resumed_buffer_path, "rb") as f:
+            initial_samples = pickle.load(f)
+        print(f"restoring replay buffer with {len(initial_samples)} samples from {resumed_buffer_path}")
+    elif args.seed_buffer_from:
         with open(args.seed_buffer_from, "rb") as f:
             initial_samples = pickle.load(f)
         print(f"seeding replay buffer with {min(len(initial_samples), args.buffer_capacity)} of {len(initial_samples)} samples from {args.seed_buffer_from}")
 
-    with MetricsLogger(args.log_dir) as metrics:
+    with MetricsLogger(log_dir) as metrics:
         print(
             f"training for {config.iterations - start_state.iteration} more iteration(s) "
             f"(starting at {start_state.iteration}); tensorboard={'on' if metrics.tensorboard_available else 'off'}"

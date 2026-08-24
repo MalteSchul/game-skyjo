@@ -314,6 +314,76 @@ def test_create_match_rejects_an_unknown_player_type():
     assert response.status_code == 422
 
 
+def test_get_mcts_models_lists_checkpoints_in_the_models_dir(tmp_path, monkeypatch):
+    from skyjo.rl.checkpoint import save_checkpoint
+    from skyjo.rl.network import AlphaZeroNet
+
+    save_checkpoint(tmp_path / "strong.pt", AlphaZeroNet(), None, iteration=1, total_train_steps=1)
+    monkeypatch.setenv("SKYJO_MCTS_MODELS_DIR", str(tmp_path))
+
+    response = client.get("/matches/mcts-models")
+
+    assert response.status_code == 200
+    assert response.json() == ["strong"]
+
+
+def test_create_match_with_an_unknown_mcts_model_is_rejected():
+    response = client.post(
+        "/matches",
+        json={
+            "player_count": 2,
+            "player_types": ["mcts_bot", "human"],
+            "player_mcts_models": ["does-not-exist", None],
+        },
+    )
+
+    assert response.status_code == 400
+
+
+def test_create_match_rejects_a_player_mcts_models_length_mismatch():
+    response = client.post(
+        "/matches",
+        json={"player_count": 2, "player_mcts_models": ["does-not-exist"]},
+    )
+
+    assert response.status_code == 400
+
+
+def test_create_match_uses_the_given_mcts_num_simulations():
+    response = client.post(
+        "/matches",
+        json={
+            "player_count": 2,
+            "player_types": ["mcts_bot", "human"],
+            "player_mcts_num_simulations": [2, None],
+        },
+    )
+
+    assert response.status_code == 201
+
+
+def test_create_match_rejects_an_out_of_range_mcts_num_simulations():
+    response = client.post(
+        "/matches",
+        json={
+            "player_count": 2,
+            "player_types": ["mcts_bot", "human"],
+            "player_mcts_num_simulations": [0, None],
+        },
+    )
+
+    assert response.status_code == 400
+
+
+def test_create_match_rejects_a_player_mcts_num_simulations_length_mismatch():
+    response = client.post(
+        "/matches",
+        json={"player_count": 2, "player_mcts_num_simulations": [2]},
+    )
+
+    assert response.status_code == 400
+
+
 def test_an_mcts_bot_seat_auto_plays_its_initial_flip(monkeypatch):
     # Keeps the real AlphaZeroNet -> MCTS -> factory -> API path intact, just
     # with few enough simulations per move to stay fast in CI.
@@ -403,7 +473,7 @@ def test_a_fully_human_match_reports_idle_status():
 def test_response_reports_thinking_status_while_a_slow_bot_is_still_deciding(monkeypatch):
     release = threading.Event()
 
-    def fake_create_bot(player_type, seed=None):
+    def fake_create_bot(player_type, seed=None, mcts_model=None, num_simulations=None):
         return None if player_type == "human" else _SlowBot(release)
 
     monkeypatch.setattr(matches, "create_bot", fake_create_bot)
@@ -426,7 +496,7 @@ def test_response_reports_thinking_status_while_a_slow_bot_is_still_deciding(mon
 def test_polling_get_match_reaches_idle_once_a_slow_bot_finishes_deciding(monkeypatch):
     release = threading.Event()
 
-    def fake_create_bot(player_type, seed=None):
+    def fake_create_bot(player_type, seed=None, mcts_model=None, num_simulations=None):
         return None if player_type == "human" else _SlowBot(release)
 
     monkeypatch.setattr(matches, "create_bot", fake_create_bot)
@@ -446,7 +516,7 @@ def test_polling_get_match_reaches_idle_once_a_slow_bot_finishes_deciding(monkey
 def test_actions_endpoint_returns_409_while_a_slow_bot_is_still_deciding(monkeypatch):
     release = threading.Event()
 
-    def fake_create_bot(player_type, seed=None):
+    def fake_create_bot(player_type, seed=None, mcts_model=None, num_simulations=None):
         return None if player_type == "human" else _SlowBot(release)
 
     monkeypatch.setattr(matches, "create_bot", fake_create_bot)
@@ -466,7 +536,7 @@ def test_actions_endpoint_returns_409_while_a_slow_bot_is_still_deciding(monkeyp
 def test_goto_returns_409_while_a_slow_bot_is_still_deciding(monkeypatch):
     release = threading.Event()
 
-    def fake_create_bot(player_type, seed=None):
+    def fake_create_bot(player_type, seed=None, mcts_model=None, num_simulations=None):
         return None if player_type == "human" else _SlowBot(release)
 
     monkeypatch.setattr(matches, "create_bot", fake_create_bot)
@@ -482,3 +552,130 @@ def test_goto_returns_409_while_a_slow_bot_is_still_deciding(monkeypatch):
     assert response.status_code == 409
     release.set()
     _wait_for_idle(client, match_id)
+
+
+# --- GET /matches/{id}/history/{node_id}/mcts-tree -----------------------------
+
+
+def _node_for_actor(match_id: str, actor: int) -> str:
+    nodes = client.get(f"/matches/{match_id}/history").json()["nodes"]
+    return next(n["node_id"] for n in nodes if n["actor"] == actor)
+
+
+def test_mcts_tree_endpoint_returns_the_search_tree_behind_that_nodes_move(monkeypatch):
+    monkeypatch.setenv("SKYJO_MCTS_NUM_SIMULATIONS", "2")
+
+    match_id = client.post(
+        "/matches",
+        json={"player_count": 2, "seed": 7, "player_types": ["mcts_bot", "human"]},
+    ).json()["match_id"]
+    _wait_for_idle(client, match_id, timeout=10.0)
+    node_id = _node_for_actor(match_id, 0)
+
+    response = client.get(f"/matches/{match_id}/history/{node_id}/mcts-tree")
+
+    assert response.status_code == 200
+    body = response.json()
+    # A dict of progress-checkpoint snapshots (see MctsBot.last_tree_snapshots),
+    # keyed by visit count as a string - not a single bare tree.
+    assert body
+    for tree in body.values():
+        assert tree["kind"] == "decision"
+        assert tree["edges"]
+    final = body[str(max(int(k) for k in body))]
+    assert final["visit_count"] > 0
+
+
+def test_history_node_reports_has_mcts_tree_only_for_the_bots_move(monkeypatch):
+    monkeypatch.setenv("SKYJO_MCTS_NUM_SIMULATIONS", "2")
+
+    match_id = client.post(
+        "/matches",
+        json={"player_count": 2, "seed": 7, "player_types": ["mcts_bot", "human"]},
+    ).json()["match_id"]
+    _wait_for_idle(client, match_id, timeout=10.0)
+
+    nodes = client.get(f"/matches/{match_id}/history").json()["nodes"]
+    root = next(n for n in nodes if n["actor"] is None)
+    bot_move = next(n for n in nodes if n["actor"] == 0)
+    assert root["has_mcts_tree"] is False
+    assert bot_move["has_mcts_tree"] is True
+
+
+def test_mcts_tree_endpoint_reflects_the_move_at_that_node_even_after_further_search(monkeypatch):
+    # A later decision (this bot's own next move, from further along the same
+    # match) must not retroactively change what an earlier node's tree looks
+    # like - see MatchNode.mcts_tree's docstring.
+    monkeypatch.setenv("SKYJO_MCTS_NUM_SIMULATIONS", "2")
+
+    match_id = client.post(
+        "/matches",
+        json={"player_count": 2, "seed": 7, "player_types": ["mcts_bot", "human"]},
+    ).json()["match_id"]
+    _wait_for_idle(client, match_id, timeout=10.0)
+    first_node_id = _node_for_actor(match_id, 0)
+    first_response = client.get(f"/matches/{match_id}/history/{first_node_id}/mcts-tree")
+    assert first_response.status_code == 200
+    first_tree = first_response.json()
+
+    # The human's own flip_initial hands control back to seat 0's bot for its
+    # *second* initial-flip decision (see test_bot_seat_finishes_its_initial_
+    # flips_after_the_human_takes_a_turn), which searches - and would advance
+    # the bot's own cached tree - all over again.
+    client.post(f"/matches/{match_id}/actions", json={"type": "flip_initial", "position": 0})
+    _wait_for_idle(client, match_id, timeout=10.0)
+
+    second_response = client.get(f"/matches/{match_id}/history/{first_node_id}/mcts-tree")
+    assert second_response.status_code == 200
+    assert second_response.json() == first_tree
+
+
+def test_mcts_tree_endpoint_404s_for_a_human_move():
+    match_id = client.post(
+        "/matches",
+        json={"player_count": 2, "seed": 7, "player_types": ["human", "human"]},
+    ).json()["match_id"]
+    client.post(f"/matches/{match_id}/actions", json={"type": "flip_initial", "position": 0})
+    human_node_id = _node_for_actor(match_id, 0)
+
+    response = client.get(f"/matches/{match_id}/history/{human_node_id}/mcts-tree")
+
+    assert response.status_code == 404
+
+
+def test_mcts_tree_endpoint_404s_for_a_bot_without_a_search_tree():
+    match_id = client.post(
+        "/matches",
+        json={"player_count": 2, "seed": 7, "player_types": ["random_bot", "human"]},
+    ).json()["match_id"]
+    node_id = _node_for_actor(match_id, 0)
+
+    response = client.get(f"/matches/{match_id}/history/{node_id}/mcts-tree")
+
+    assert response.status_code == 404
+
+
+def test_mcts_tree_endpoint_404s_for_the_root_node():
+    match_id = client.post(
+        "/matches",
+        json={"player_count": 2, "seed": 7, "player_types": ["mcts_bot", "human"]},
+    ).json()["match_id"]
+    root_id = client.get(f"/matches/{match_id}/history").json()["nodes"][0]["node_id"]
+
+    response = client.get(f"/matches/{match_id}/history/{root_id}/mcts-tree")
+
+    assert response.status_code == 404
+
+
+def test_mcts_tree_endpoint_404s_for_an_unknown_node():
+    match_id = client.post("/matches", json={"player_count": 2, "seed": 7}).json()["match_id"]
+
+    response = client.get(f"/matches/{match_id}/history/does-not-exist/mcts-tree")
+
+    assert response.status_code == 404
+
+
+def test_mcts_tree_endpoint_on_unknown_match_returns_404():
+    response = client.get("/matches/does-not-exist/history/does-not-exist/mcts-tree")
+
+    assert response.status_code == 404

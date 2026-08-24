@@ -135,12 +135,13 @@ interface GraphRowsProps {
   rows: RowGraphInfo[]
   laneCount: number
   headId: string
+  matchId: string
   playerNames: string[]
   onGoto: (nodeId: string) => void
   busy: boolean
 }
 
-function GraphRows({ rows, laneCount, headId, playerNames, onGoto, busy }: GraphRowsProps) {
+function GraphRows({ rows, laneCount, headId, matchId, playerNames, onGoto, busy }: GraphRowsProps) {
   const gutterWidth = laneCount * LANE_WIDTH
   return (
     <ol className="history-graph">
@@ -194,6 +195,18 @@ function GraphRows({ rows, laneCount, headId, playerNames, onGoto, busy }: Graph
             >
               {describeNode(info.node, playerNames)}
             </button>
+            {info.node.has_mcts_tree && (
+              <a
+                className="history-tree-link"
+                href={`/tools/mcts-tree?matchId=${matchId}&nodeId=${info.node.node_id}`}
+                target="_blank"
+                rel="noreferrer"
+                title="View the MCTS search tree behind this move"
+                aria-label="View the MCTS search tree behind this move"
+              >
+                🌳
+              </a>
+            )}
           </li>
         )
       })}
@@ -203,12 +216,13 @@ function GraphRows({ rows, laneCount, headId, playerNames, onGoto, busy }: Graph
 
 interface HistoryPanelProps {
   history: MatchHistoryOut | null
+  matchId: string
   playerNames: string[]
   onGoto: (nodeId: string) => void
   busy: boolean
 }
 
-function HistoryPanel({ history, playerNames, onGoto, busy }: HistoryPanelProps) {
+function HistoryPanel({ history, matchId, playerNames, onGoto, busy }: HistoryPanelProps) {
   const [showFull, setShowFull] = useState(false)
   const layout = useMemo(
     () => (history ? buildGraphLayout(history.nodes, history.head_id) : null),
@@ -247,6 +261,7 @@ function HistoryPanel({ history, playerNames, onGoto, busy }: HistoryPanelProps)
         rows={windowedRows}
         laneCount={layout.laneCount}
         headId={history.head_id}
+        matchId={matchId}
         playerNames={playerNames}
         onGoto={goto}
         busy={busy}
@@ -278,6 +293,7 @@ function HistoryPanel({ history, playerNames, onGoto, busy }: HistoryPanelProps)
                   rows={layout.rows}
                   laneCount={layout.laneCount}
                   headId={history.head_id}
+                  matchId={matchId}
                   playerNames={playerNames}
                   onGoto={goto}
                   busy={busy}

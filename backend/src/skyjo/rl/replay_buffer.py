@@ -32,6 +32,12 @@ class ReplayBuffer:
     def __len__(self) -> int:
         return len(self._samples)
 
+    @property
+    def samples(self) -> list[ReplaySample]:
+        """Current contents in FIFO storage order (not insertion-recency order
+        once the buffer has wrapped) - read-only, for persistence only."""
+        return list(self._samples)
+
     def add(self, sample: ReplaySample) -> None:
         encoding = encode_state(sample.state)
         if len(self._samples) < self._capacity:

@@ -20,6 +20,7 @@ and deterministic.
 
 from __future__ import annotations
 
+import pickle
 import time
 import traceback
 from collections.abc import Sequence
@@ -32,6 +33,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from skyjo.bots.base import Bot
 from skyjo.domain.engine import MAX_PLAYERS, MIN_PLAYERS, new_match
 from skyjo.rl.checkpoint import save_checkpoint
 from skyjo.rl.evaluator import (
@@ -55,6 +57,7 @@ from skyjo.rl.selfplay import (
     DEFAULT_ROUND_MAX_STEPS,
     ReplaySample,
     generate_episode,
+    generate_episode_vs_bot,
     generate_episodes_batch,
 )
 from skyjo.rl.train import DEFAULT_L2_COEF, DEFAULT_LAMBDA_RANK, collate_batch, training_step
@@ -107,6 +110,17 @@ class TrainingConfig:
     # call instead of one call per state - see `rl.mcts.run_mcts_batch`.
     # `workers` still shards jobs (now groups) across processes the same way.
     selfplay_batch_size: int = 1
+    # "self" (default): self-play, net vs itself (batched via
+    # `selfplay_batch_size`, see above). "heuristic"/"random": every game is
+    # the net vs `HeuristicBot`/`RandomBot`, alternating which seat the net
+    # plays across `games_per_iteration` - only `net_seat`'s decisions get
+    # MCTS search and a recorded `pi` target (see
+    # `selfplay.generate_episode_vs_bot`), so training data directly
+    # reflects play against a fixed external reference instead of the net's
+    # own (possibly drifting) current policy. No batching support yet -
+    # always one game per job regardless of `selfplay_batch_size`. Requires
+    # min_players == max_players == 2.
+    selfplay_opponent: str = "self"
     seed: int = 0
     checkpoint_dir: str | None = None
     checkpoint_every: int = 1
@@ -159,6 +173,14 @@ class TrainingConfig:
             raise ValueError("TrainingConfig: eval_games must be > 0")
         if self.eval_num_simulations < 0:
             raise ValueError("TrainingConfig: eval_num_simulations must be >= 0")
+        if self.selfplay_opponent not in ("self", "heuristic", "random"):
+            raise ValueError(
+                f"TrainingConfig: selfplay_opponent must be 'self', 'heuristic', or 'random', got {self.selfplay_opponent!r}"
+            )
+        if self.selfplay_opponent != "self" and not (self.min_players == self.max_players == 2):
+            raise ValueError(
+                f"TrainingConfig: selfplay_opponent={self.selfplay_opponent!r} requires min_players == max_players == 2"
+            )
 
 
 @dataclass
@@ -445,6 +467,133 @@ def run_self_play_iteration(
     return samples, failed_games, round_stats
 
 
+@dataclass(frozen=True)
+class _SelfPlayVsBotJob:
+    seed: int
+    net_seat: int
+    opponent: str  # "heuristic" or "random" - see TrainingConfig.selfplay_opponent
+    num_simulations: int
+    tau: float
+    c_puct: float
+    dirichlet_alpha: float
+    dirichlet_epsilon: float
+    max_steps: int
+    round_max_steps: int
+    max_rounds: int
+    failure_log_path: str
+
+
+def _log_failure_vs_bot(job: _SelfPlayVsBotJob, exc: Exception) -> None:
+    summary = f"_play_one_game_vs_bot: seed={job.seed} net_seat={job.net_seat} opponent={job.opponent} failed, skipping: {exc}"
+    print(summary)
+    with open(job.failure_log_path, "a", encoding="utf-8") as f:
+        f.write(f"--- {datetime.now(UTC).isoformat()} {summary}\n")
+        f.write(traceback.format_exc())
+        f.write("\n")
+
+
+def _build_opponent_bot(opponent: str, seed: int) -> Bot:
+    """`HeuristicBot`/`RandomBot` are imported lazily here, not at module
+    level, for the same circular-import reason `evaluator._play_one_eval_game`
+    does it - see that function's module docstring."""
+    if opponent == "heuristic":
+        from skyjo.bots.heuristic_bot import HeuristicBot
+
+        return HeuristicBot(seed=seed)
+    if opponent == "random":
+        from skyjo.bots.random_bot import RandomBot
+
+        return RandomBot(seed=seed)
+    raise ValueError(f"_build_opponent_bot: unknown opponent {opponent!r}")
+
+
+def _play_one_game_vs_bot(
+    job: _SelfPlayVsBotJob,
+) -> tuple[list[ReplaySample], tuple[int, tuple[int, ...]] | None]:
+    """Same failure-isolation contract as `_play_one_game` - see its
+    docstring."""
+    if _worker_evaluate is None:
+        raise RuntimeError("_play_one_game_vs_bot: worker was not initialized via _init_worker")
+    rng = np.random.default_rng(job.seed)
+    initial_state = new_match(player_count=2, seed=job.seed)
+    opponent = _build_opponent_bot(job.opponent, job.seed)
+    round_stats: list[tuple[int, tuple[int, ...]]] = []
+    try:
+        samples = generate_episode_vs_bot(
+            initial_state,
+            _worker_evaluate,
+            opponent.choose_action,
+            job.net_seat,
+            num_simulations=job.num_simulations,
+            tau_schedule=job.tau,
+            c_puct=job.c_puct,
+            dirichlet_alpha=job.dirichlet_alpha,
+            dirichlet_epsilon=job.dirichlet_epsilon,
+            rng=rng,
+            max_steps=job.max_steps,
+            round_max_steps=job.round_max_steps,
+            max_rounds=job.max_rounds,
+            round_stats_sink=round_stats,
+        )
+    except Exception as exc:  # noqa: BLE001 - deliberately blind, see _play_one_game's docstring
+        _log_failure_vs_bot(job, exc)
+        return [], None
+    return samples, round_stats[0] if round_stats else None
+
+
+def _build_vs_bot_jobs(
+    config: TrainingConfig, rng: np.random.Generator, failure_log_path: str
+) -> list[_SelfPlayVsBotJob]:
+    seeds = rng.integers(0, 2**31 - 1, size=config.games_per_iteration)
+    return [
+        _SelfPlayVsBotJob(
+            seed=int(seed),
+            net_seat=i % 2,  # alternate which seat the net plays, matching evaluator/tournament
+            opponent=config.selfplay_opponent,
+            num_simulations=config.num_simulations,
+            tau=config.tau,
+            c_puct=config.c_puct,
+            dirichlet_alpha=config.dirichlet_alpha,
+            dirichlet_epsilon=config.dirichlet_epsilon,
+            max_steps=config.max_steps_per_episode,
+            round_max_steps=config.round_max_steps,
+            max_rounds=config.max_rounds,
+            failure_log_path=failure_log_path,
+        )
+        for i, seed in enumerate(seeds)
+    ]
+
+
+def run_self_play_iteration_vs_bot(
+    net: AlphaZeroNet, config: TrainingConfig, jobs: list[_SelfPlayVsBotJob]
+) -> tuple[list[ReplaySample], int, list[tuple[int, tuple[int, ...]]]]:
+    """`selfplay_opponent in ("heuristic", "random")` sibling of
+    `run_self_play_iteration` - same return shape and failure-isolation
+    contract, one game per job (no `selfplay_batch_size` support yet)."""
+    state_dict = {k: v.detach().cpu() for k, v in net.state_dict().items()}
+
+    if config.workers <= 1:
+        _init_worker(state_dict, config.network_kwargs)
+        episode_results = [_play_one_game_vs_bot(job) for job in jobs]
+    else:
+        with ProcessPoolExecutor(
+            max_workers=config.workers, initializer=_init_worker, initargs=(state_dict, config.network_kwargs)
+        ) as pool:
+            episode_results = list(pool.map(_play_one_game_vs_bot, jobs))
+
+    samples: list[ReplaySample] = []
+    failed_games = 0
+    round_stats: list[tuple[int, tuple[int, ...]]] = []
+    for episode_samples, game_round_stats in episode_results:
+        if episode_samples:
+            samples.extend(episode_samples)
+            if game_round_stats is not None:
+                round_stats.append(game_round_stats)
+        else:
+            failed_games += 1
+    return samples, failed_games, round_stats
+
+
 def run_training_loop(
     config: TrainingConfig,
     metrics: MetricsLogger,
@@ -476,7 +625,10 @@ def run_training_loop(
         step = state.iteration
 
         self_play_start = time.monotonic()
-        if config.selfplay_batch_size <= 1:
+        if config.selfplay_opponent != "self":
+            vs_bot_jobs = _build_vs_bot_jobs(config, rng, failure_log_path)
+            samples, failed_games, round_stats = run_self_play_iteration_vs_bot(net, config, vs_bot_jobs)
+        elif config.selfplay_batch_size <= 1:
             jobs = _build_jobs(config, rng, failure_log_path)
             samples, failed_games, round_stats = run_self_play_iteration(net, config, jobs)
         else:
@@ -561,5 +713,11 @@ def run_training_loop(
                 total_train_steps=state.total_train_steps,
                 extra=extra,
             )
+            # Only "latest" is kept (not per-checkpoint), so a resume doesn't
+            # keep piling up ~400MB+ buffer snapshots alongside every numbered
+            # checkpoint - the buffer's FIFO contents are exploration state,
+            # not something worth preserving historically like the net weights.
+            with open(Path(config.checkpoint_dir) / "buffer_latest.pkl", "wb") as f:
+                pickle.dump(buffer.samples, f)
 
     return net, state

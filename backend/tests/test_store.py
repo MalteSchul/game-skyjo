@@ -237,3 +237,55 @@ def test_apply_action_is_allowed_again_once_a_pending_autoplay_finishes():
     node, _, _ = store.apply_action(match_id, _flip_action(0), _compute_flip(0))
 
     assert node.state.boards[0].cards[0].face_up is True
+
+
+# --- per-node mcts_tree storage ------------------------------------------------
+
+
+def test_apply_autoplay_action_attaches_the_given_tree_to_the_new_node():
+    store = MatchStore()
+    match_id = _new_match_id(store)
+    tree = {"kind": "decision", "edges": []}
+
+    node, _, _ = store.apply_autoplay_action(match_id, _flip_action(0), _compute_flip(0), mcts_tree=tree)
+
+    assert node.mcts_tree == tree
+    assert store.get_node(match_id, node.node_id).mcts_tree == tree
+
+
+def test_apply_action_leaves_mcts_tree_as_none():
+    store = MatchStore()
+    match_id = _new_match_id(store)
+
+    node, _, _ = store.apply_action(match_id, _flip_action(0), _compute_flip(0))
+
+    assert node.mcts_tree is None
+
+
+def test_replaying_an_existing_edge_keeps_its_original_tree_rather_than_the_new_one():
+    store = MatchStore()
+    match_id = _new_match_id(store)
+    root_id = store.get_head(match_id)[0].node_id
+    original_tree = {"kind": "decision", "edges": ["original"]}
+    node, _, _ = store.apply_autoplay_action(match_id, _flip_action(0), _compute_flip(0), mcts_tree=original_tree)
+    store.goto(match_id, root_id)
+
+    replayed, _, _ = store.apply_autoplay_action(
+        match_id, _flip_action(0), _compute_flip(0), mcts_tree={"kind": "decision", "edges": ["different"]}
+    )
+
+    assert replayed.node_id == node.node_id
+    assert replayed.mcts_tree == original_tree
+
+
+def test_get_node_does_not_move_the_head():
+    store = MatchStore()
+    match_id = _new_match_id(store)
+    root_id = store.get_head(match_id)[0].node_id
+    store.apply_action(match_id, _flip_action(0), _compute_flip(0))
+    head_before = store.get_head(match_id)[0].node_id
+
+    fetched = store.get_node(match_id, root_id)
+
+    assert fetched.node_id == root_id
+    assert store.get_head(match_id)[0].node_id == head_before

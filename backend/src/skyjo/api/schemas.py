@@ -47,6 +47,17 @@ class NewMatchRequest(BaseModel):
     # One type per player, in seat order. Omitted defaults every seat to
     # "human" — see api.matches._resolve_player_types.
     player_types: list[PlayerTypeName] | None = None
+    # One entry per player, in seat order — a name from GET /matches/mcts-models
+    # to use for that seat's mcts_bot, or None for the untrained default
+    # network. Ignored for seats whose player_type isn't "mcts_bot". Omitted
+    # defaults every seat to None — see api.matches._resolve_mcts_models.
+    player_mcts_models: list[str | None] | None = None
+    # One entry per player, in seat order — overrides that seat's mcts_bot
+    # search depth (rollouts per move), or None for the process default (see
+    # bots.mcts_bot.default_num_simulations). Ignored for seats whose
+    # player_type isn't "mcts_bot". Omitted defaults every seat to None — see
+    # api.matches._resolve_mcts_num_simulations.
+    player_mcts_num_simulations: list[int | None] | None = None
 
 
 class ActionRequest(BaseModel):
@@ -155,6 +166,10 @@ class HistoryNodeOut(BaseModel):
     current_player: int
     phase: Phase
     edge: HistoryEdgeOut
+    # Whether GET /matches/{id}/history/{node_id}/mcts-tree has something to
+    # return for this node - lets the history panel show a tree affordance
+    # only where one actually exists, without probing every node.
+    has_mcts_tree: bool
 
     @classmethod
     def from_node(cls, node: MatchNode) -> HistoryNodeOut:
@@ -167,6 +182,7 @@ class HistoryNodeOut(BaseModel):
             current_player=node.state.current_player,
             phase=node.state.phase,
             edge=HistoryEdgeOut.from_edge(node.edge),
+            has_mcts_tree=node.mcts_tree is not None,
         )
 
 

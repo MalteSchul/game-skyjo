@@ -49,6 +49,8 @@ export interface NewMatchRequest {
   seed?: number
   player_names?: string[]
   player_types?: PlayerTypeName[]
+  player_mcts_models?: (string | null)[]
+  player_mcts_num_simulations?: (number | null)[]
 }
 
 export interface ActionRequest {
@@ -73,6 +75,7 @@ export interface HistoryNodeOut {
   current_player: number
   phase: Phase
   edge: HistoryEdgeOut
+  has_mcts_tree: boolean
 }
 
 export interface MatchHistoryOut {

@@ -64,15 +64,17 @@ function DecisionNodeBlockView({
   onFocusTrend,
 }: Omit<NodeBlockProps, 'node' | 'compareNode'> & { node: DecisionNode; compareNode: DecisionNode | null }) {
   const [showValue, setShowValue] = useState(false)
+  const { showWinRate } = useViewSettings()
   const edges = [...node.edges].sort((a, b) => b.visit_count - a.visit_count)
   const maxVisit = edges[0]?.visit_count ?? 0
   const bestPuctEdge = edges.reduce<DecisionEdge | null>((best, e) => (best === null || e.puct_score > best.puct_score ? e : best), null)
   const totalVisits = edges.reduce((sum, e) => sum + e.visit_count, 0) || 1
+  const winRate = showWinRate ? node.rank_probs?.[node.current_player]?.[0] : undefined
 
   return (
     <div className="mtx-node-block">
       <div className="mtx-node-header">
-        <PlayerBadge index={node.current_player} />
+        <PlayerBadge index={node.current_player} winRate={winRate} />
         <span className="mtx-pill mtx-pill-phase">{node.phase}</span>
         {node.is_terminal && <span className="mtx-pill mtx-pill-terminal">⏹ game over</span>}
         <span className="mtx-visit-badge">N={node.visit_count}</span>

@@ -427,6 +427,11 @@ body.mcts-tools-page #root {
 .mtx-pill-player {
   color: #fff;
 }
+.mtx-pill-winrate {
+  font-family: var(--mono);
+  font-weight: 500;
+  opacity: 0.85;
+}
 .mtx-pill-phase {
   background: var(--code-bg);
   color: var(--text);

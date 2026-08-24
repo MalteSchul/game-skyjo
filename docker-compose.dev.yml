@@ -1,0 +1,18 @@
+services:
+  backend:
+    command: uv run uvicorn skyjo.api:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/models:/app/models
+
+  frontend:
+    build:
+      target: build
+    command: sh -c "npm run dev -- --host 0.0.0.0 --port 5173"
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+    depends_on:
+      - backend

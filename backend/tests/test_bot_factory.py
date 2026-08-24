@@ -35,6 +35,25 @@ def test_mcts_bot_type_returns_an_mcts_bot_instance():
     assert isinstance(bot, MctsBot)
 
 
+def test_mcts_bot_type_with_an_unknown_model_raises():
+    with pytest.raises(ValueError):
+        create_bot("mcts_bot", seed=5, mcts_model="does-not-exist")
+
+
+def test_mcts_bot_type_uses_the_given_num_simulations():
+    bot = create_bot("mcts_bot", seed=5, num_simulations=7)
+
+    assert bot._num_simulations == 7
+
+
+def test_mcts_bot_type_defaults_num_simulations_when_not_given():
+    from skyjo.bots.mcts_bot import default_num_simulations
+
+    bot = create_bot("mcts_bot", seed=5)
+
+    assert bot._num_simulations == default_num_simulations()
+
+
 def test_rejects_an_unknown_player_type():
     with pytest.raises(ValueError):
         create_bot("grandmaster")

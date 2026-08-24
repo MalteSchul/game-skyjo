@@ -156,6 +156,91 @@ def generate_episode(
     return [ReplaySample(state=s, n_act=n_act, pi=pi_vector, y=y) for s, pi_vector in pending]
 
 
+def generate_episode_vs_bot(
+    initial_state: GameState,
+    evaluate: EvaluateFn,
+    opponent_choose_action: Callable[[Turn], Action],
+    net_seat: int,
+    *,
+    num_simulations: int,
+    tau_schedule: Callable[[int], float] | float = 1.0,
+    c_puct: float = DEFAULT_C_PUCT,
+    dirichlet_alpha: float = DEFAULT_DIRICHLET_ALPHA,
+    dirichlet_epsilon: float = DEFAULT_DIRICHLET_EPSILON,
+    rng: np.random.Generator | None = None,
+    max_steps: int = DEFAULT_MAX_STEPS,
+    round_max_steps: int = DEFAULT_ROUND_MAX_STEPS,
+    max_rounds: int = DEFAULT_MAX_ROUNDS,
+    round_stats_sink: list[tuple[int, tuple[int, ...]]] | None = None,
+) -> list[ReplaySample]:
+    """Like `generate_episode`, but only seat `net_seat` is driven by MCTS
+    search over `evaluate` - every other seat's move comes straight from
+    `opponent_choose_action` (e.g. `HeuristicBot.choose_action`), no search,
+    same as `generate_bot_episode`'s opponent handling. Only `net_seat`'s
+    decisions produce a `ReplaySample`: an opponent move was never scored by
+    `evaluate`/MCTS, so there's no `pi` search target to record for it.
+
+    Exists so self-play data can be generated against a fixed external
+    reference instead of the net's own current policy - see
+    `rl.loop.TrainingConfig.selfplay_opponent`.
+    """
+    rng = rng if rng is not None else np.random.default_rng()
+    state = initial_state
+    n_act = len(state.boards)
+    pending: list[tuple[GameState, np.ndarray]] = []
+    round_step = 0
+    round_count = 0
+
+    for step in range(max_steps):
+        if state.phase == "round_over":
+            round_count += 1
+            if round_count >= max_rounds:
+                break
+            state = start_next_round(state)
+            round_step = 0
+            continue
+        if state.phase == "game_over":
+            break
+        if round_step >= round_max_steps:
+            state = force_close_round(state)
+            round_step = 0
+            continue
+
+        turn = Turn.from_state(state)
+        if turn.acting_player != net_seat:
+            action = opponent_choose_action(turn)
+            state = apply_action(state, action)
+            round_step += 1
+            continue
+
+        tau = tau_schedule(step) if callable(tau_schedule) else tau_schedule
+        root = run_mcts(
+            turn,
+            evaluate,
+            num_simulations=num_simulations,
+            c_puct=c_puct,
+            dirichlet_alpha=dirichlet_alpha,
+            dirichlet_epsilon=dirichlet_epsilon,
+            rng=rng,
+        )
+        pi = visit_distribution(root, tau=tau)
+        pending.append((state, pi_to_vector(pi)))
+
+        representative = sample_action(pi, rng)
+        group = tied_actions(turn, representative)
+        action = group[rng.integers(len(group))] if len(group) > 1 else representative
+        state = apply_action(state, action)
+        round_step += 1
+    else:
+        raise RuntimeError(f"generate_episode_vs_bot: match did not reach game_over within {max_steps} steps")
+
+    if round_stats_sink is not None:
+        round_stats_sink.append((round_count, tuple(int(s) for s in state.total_scores)))
+
+    y = np.asarray(final_ranks(state.total_scores), dtype=np.int64)
+    return [ReplaySample(state=s, n_act=n_act, pi=pi_vector, y=y) for s, pi_vector in pending]
+
+
 def generate_episodes_batch(
     initial_states: Sequence[GameState],
     evaluate_batch: BatchEvaluateFn,

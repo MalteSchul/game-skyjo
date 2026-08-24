@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import functools
 import os
+from pathlib import Path
 
 import numpy as np
 
@@ -39,6 +40,7 @@ from skyjo.rl.mcts import (
     run_mcts,
 )
 from skyjo.rl.network import AlphaZeroNet
+from skyjo.rl.tree_export import tree_to_dict
 
 # If set, default_evaluator() loads this checkpoint (the format
 # skyjo.rl.checkpoint.save_checkpoint writes, e.g. scripts/train_mcts.py's
@@ -53,11 +55,56 @@ NUM_SIMULATIONS_ENV_VAR = "SKYJO_MCTS_NUM_SIMULATIONS"
 
 DEFAULT_NUM_SIMULATIONS = 200
 
+# `last_tree_snapshots` progress checkpoints, as a fraction of `num_simulations`
+# - mirrors `scripts/dump_mcts_tree.py --sim-points` so the "why did it pick
+# this" UI can show the tree actually growing across a decision instead of
+# only its finished state.
+_SNAPSHOT_PROGRESS_FRACTIONS = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+
+# Depth captured in each `last_tree_snapshots` snapshot - matches the old
+# `last_tree_dict(max_depth=2)` default, the only value any caller ever used.
+_SNAPSHOT_MAX_DEPTH = 2
+
+# Directory scanned for selectable named checkpoints - every "*.pt" file in it
+# becomes a model the UI can offer for an mcts_bot seat (see list_available_models
+# / evaluator_for_model), keyed by filename stem. Separate from
+# CHECKPOINT_PATH_ENV_VAR, which points at a single fixed checkpoint used when no
+# model is explicitly selected.
+MODELS_DIR_ENV_VAR = "SKYJO_MCTS_MODELS_DIR"
+DEFAULT_MODELS_DIR = "models"
+
+
+def _models_dir() -> Path:
+    return Path(os.environ.get(MODELS_DIR_ENV_VAR, DEFAULT_MODELS_DIR))
+
+
+def list_available_models() -> list[str]:
+    """Names of the checkpoints in the models directory, sorted alphabetically.
+    Each name is a ".pt" file's stem and can be passed to `evaluator_for_model`."""
+    directory = _models_dir()
+    if not directory.is_dir():
+        return []
+    return sorted(p.stem for p in directory.glob("*.pt"))
+
+
+@functools.lru_cache(maxsize=None)
+def evaluator_for_model(model_name: str) -> EvaluateFn:
+    """Evaluator for a named checkpoint from the models directory. Cached per
+    model name (like `default_evaluator`) so selecting the same model for
+    multiple seats reuses one loaded network."""
+    path = _models_dir() / f"{model_name}.pt"
+    if not path.is_file():
+        raise ValueError(f"evaluator_for_model: unknown model {model_name!r}")
+    net = AlphaZeroNet()
+    load_checkpoint(path, net)
+    return make_network_evaluator(net)
+
 
 @functools.lru_cache(maxsize=1)
 def default_evaluator() -> EvaluateFn:
-    """The process-wide evaluator every mcts_bot seat shares. Cached so the
-    (untrained, unless a checkpoint is configured) network is built once."""
+    """The process-wide evaluator an mcts_bot seat uses when no model is
+    explicitly selected. Cached so the (untrained, unless a checkpoint is
+    configured) network is built once."""
     net = AlphaZeroNet()
     checkpoint_path = os.environ.get(CHECKPOINT_PATH_ENV_VAR)
     if checkpoint_path:
@@ -102,6 +149,17 @@ class MctsBot:
         # latency (fewer new simulations needed to reach that target), not
         # just a stronger search at the same cost.
         self._cached_root: MCTSNode | None = None
+        # Progress-checkpoint exports (see `_SNAPSHOT_PROGRESS_FRACTIONS`) of
+        # the most recent `choose_action`'s search, captured *during* that
+        # search - not just derived from the finished root afterwards, since
+        # `_cached_root` gets walked forward (and its nodes' visit counts keep
+        # growing in place) the moment `observe_transition` sees an action
+        # applied, which would otherwise lose both the tree's growth over the
+        # search *and* every rejected root-level alternative (the very thing
+        # a "why did it pick this" view needs). Keyed by the actual visit
+        # count at that checkpoint (a string, same convention as
+        # `dump_mcts_tree.py`'s output).
+        self._last_decision_snapshots: dict[str, dict] | None = None
 
     def choose_action(self, turn: Turn, *, report_progress: ProgressReporter | None = None) -> Action:
         reuse_root = self._cached_root
@@ -110,9 +168,27 @@ class MctsBot:
         already_visited = reuse_root.visit_count if reuse_root is not None else 0
         remaining = max(0, self._num_simulations - already_visited)
 
+        # Visit counts (absolute, not step-relative) at which to freeze a
+        # snapshot - deduped/sorted since small `num_simulations` can round
+        # several fractions to the same integer.
+        target_visit_counts = sorted({round(f * self._num_simulations) for f in _SNAPSHOT_PROGRESS_FRACTIONS})
+        snapshots: dict[str, dict] = {}
+        root_box: list[MCTSNode] = []
+
+        def snapshot(root: MCTSNode) -> dict:
+            return tree_to_dict(root, max_depth=_SNAPSHOT_MAX_DEPTH, c_puct=self._c_puct)
+
+        def on_root_ready(root: MCTSNode) -> None:
+            root_box.append(root)
+            if already_visited in target_visit_counts:
+                snapshots[str(already_visited)] = snapshot(root)
+
         def on_simulation(step: int) -> None:
+            visits = already_visited + step
+            if visits in target_visit_counts:
+                snapshots[str(visits)] = snapshot(root_box[0])
             if report_progress is not None:
-                report_progress((already_visited + step) / self._num_simulations)
+                report_progress(visits / self._num_simulations)
 
         root = run_mcts(
             turn,
@@ -124,17 +200,37 @@ class MctsBot:
             # artificially perturbed one.
             add_root_noise=False,
             rng=self._rng,
+            on_root_ready=on_root_ready,
             on_simulation=on_simulation if remaining > 0 else None,
             reuse_root=reuse_root,
         )
+        # Guarantees at least one (the final) snapshot even when none of
+        # target_visit_counts landed exactly on the search's actual visit
+        # counts - e.g. a reused root already past every checkpoint but 100%.
+        if str(root.visit_count) not in snapshots:
+            snapshots[str(root.visit_count)] = snapshot(root)
+
         # Most-visited (strongest) action, not a tau-sampled one - see
         # `greedy_action`'s docstring for why ties are broken randomly.
         best_action = greedy_action(root, self._rng)
         self._cached_root = root
+        self._last_decision_snapshots = snapshots
 
         if report_progress is not None and remaining == 0:
             report_progress(1.0)
         return best_action
+
+    def last_tree_snapshots(self) -> dict[str, dict] | None:
+        """JSON-ready exports (see `tree_export.tree_to_dict`), keyed by
+        visit count as a string, of the search tree behind this bot's most
+        recent `choose_action` decision at ~0/20/40/60/80/100% progress - for
+        a "why did it pick this" view, e.g. in the live match UI, that can
+        show the tree actually growing rather than only its finished state.
+        Each snapshot reflects the full root (every legal action considered,
+        not just the one taken), since they're captured before
+        `observe_transition` walks `_cached_root` past it. `None` if
+        `choose_action` hasn't been called yet."""
+        return self._last_decision_snapshots
 
     def observe_transition(self, turn_before: Turn, action: Action, turn_after: Turn) -> None:
         """Advances `self._cached_root` by one real transition - see

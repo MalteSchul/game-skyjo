@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { DragEvent } from 'react'
+import { ApiError, getMctsTree } from '../../api/matchClient'
 import { normalizeSnapshots, sortedSnapshotKeys, TreeParseError } from './treeParse'
 import type { SnapshotMap, TreeNode } from './types'
 import { actionLabel, bestLinePrefixIds, buildTrendSeries, collectAllPathIds, computeBestLine, fmtPct, fmtSigned, pathId, topEdgeByVisits } from './treeUtils'
@@ -40,10 +41,24 @@ export default function McTreeExplorerPage() {
   const [error, setError] = useState<string | null>(null)
   const [dragOver, setDragOver] = useState(false)
 
+  // ?matchId=...&nodeId=... points this page at one history node's move in a
+  // live match, instead of a dropped file — see
+  // api.matches.get_history_node_mcts_tree. Read once: this page has no
+  // router, and re-parsing on every render would be pointless since the URL
+  // never changes without a full reload here.
+  const [liveMatch] = useState(() => {
+    const params = new URLSearchParams(window.location.search)
+    const matchId = params.get('matchId')
+    const nodeId = params.get('nodeId')
+    return matchId && nodeId ? { matchId, nodeId } : null
+  })
+  const [liveLoading, setLiveLoading] = useState(liveMatch !== null)
+
   const [activeIndex, setActiveIndex] = useState(0)
   const [compareKey, setCompareKey] = useState<string | null>(null)
   const [filterText, setFilterText] = useState('')
   const [hideZero, setHideZero] = useState(false)
+  const [showWinRate, setShowWinRate] = useState(false)
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set())
   const [chartPath, setChartPath] = useState<string[]>([])
 
@@ -62,6 +77,21 @@ export default function McTreeExplorerPage() {
     setChartPath([])
   }, [activeKey, root])
 
+  function applyData(data: unknown, label: string) {
+    try {
+      const normalized = normalizeSnapshots(data)
+      const keys = sortedSnapshotKeys(normalized)
+      setSnapshots(normalized)
+      setOrder(keys)
+      setFileName(label)
+      setActiveIndex(keys.length - 1)
+      setCompareKey(null)
+      setError(null)
+    } catch (err) {
+      setError(err instanceof TreeParseError ? err.message : 'Something went wrong reading that data.')
+    }
+  }
+
   function loadFile(file: File) {
     setError(null)
     const reader = new FileReader()
@@ -73,21 +103,30 @@ export default function McTreeExplorerPage() {
         setError(`That file isn't valid JSON (${err instanceof Error ? err.message : String(err)}).`)
         return
       }
-      try {
-        const normalized = normalizeSnapshots(data)
-        const keys = sortedSnapshotKeys(normalized)
-        setSnapshots(normalized)
-        setOrder(keys)
-        setFileName(file.name)
-        setActiveIndex(keys.length - 1)
-        setCompareKey(null)
-      } catch (err) {
-        setError(err instanceof TreeParseError ? err.message : 'Something went wrong reading that file.')
-      }
+      applyData(data, file.name)
     }
     reader.onerror = () => setError("Couldn't read that file.")
     reader.readAsText(file)
   }
+
+  const loadFromLiveMatch = useCallback(() => {
+    if (!liveMatch) return
+    setLiveLoading(true)
+    setError(null)
+    getMctsTree(liveMatch.matchId, liveMatch.nodeId)
+      .then((data) => applyData(data, `match ${liveMatch.matchId} · node ${liveMatch.nodeId}`))
+      .catch((err) => {
+        setError(err instanceof ApiError ? err.message : "Couldn't load that match's search tree.")
+      })
+      .finally(() => setLiveLoading(false))
+  }, [liveMatch])
+
+  useEffect(() => {
+    loadFromLiveMatch()
+    // Runs once on mount only — loadFromLiveMatch is stable across the
+    // lifetime of this page (liveMatch is read once, see above).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   function handleDrop(e: DragEvent<HTMLDivElement>) {
     e.preventDefault()
@@ -122,9 +161,14 @@ export default function McTreeExplorerPage() {
         {snapshots && (
           <div className="mtx-topbar-actions">
             <span className="mtx-file-pill">
-              <span aria-hidden="true">📄</span>
+              <span aria-hidden="true">{liveMatch ? '🔴' : '📄'}</span>
               <span className="mtx-fname">{fileName}</span>
             </span>
+            {liveMatch && (
+              <button type="button" className="mtx-btn" onClick={loadFromLiveMatch} disabled={liveLoading}>
+                {liveLoading ? 'Reloading…' : 'Reload latest'}
+              </button>
+            )}
             <button type="button" className="mtx-btn" onClick={() => fileInputRef.current?.click()}>
               Load different file
             </button>
@@ -144,7 +188,27 @@ export default function McTreeExplorerPage() {
         />
       </header>
 
-      {!snapshots ? (
+      {!snapshots && liveMatch ? (
+        <div className="mtx-empty-state">
+          <div className="mtx-dropzone">
+            <div className="mtx-glyph" aria-hidden="true">🌳</div>
+            <h2>{liveLoading ? 'Loading the match’s search tree…' : 'Could not load that match'}</h2>
+            <p>
+              match <code>{liveMatch.matchId}</code>, node <code>{liveMatch.nodeId}</code>
+            </p>
+            {error && (
+              <div className="mtx-error-line" role="alert">
+                {error}
+              </div>
+            )}
+            {!liveLoading && (
+              <button type="button" className="mtx-btn mtx-btn-primary" onClick={loadFromLiveMatch}>
+                Retry
+              </button>
+            )}
+          </div>
+        </div>
+      ) : !snapshots ? (
         <div className="mtx-empty-state">
           <div
             className={`mtx-dropzone${dragOver ? ' mtx-drag-over' : ''}`}
@@ -215,6 +279,10 @@ export default function McTreeExplorerPage() {
               <label className="mtx-checkline">
                 <input type="checkbox" checked={hideZero} onChange={(e) => setHideZero(e.target.checked)} />
                 Hide never-visited edges
+              </label>
+              <label className="mtx-checkline">
+                <input type="checkbox" checked={showWinRate} onChange={(e) => setShowWinRate(e.target.checked)} />
+                Show win % on player badge
               </label>
             </details>
 
@@ -316,7 +384,7 @@ export default function McTreeExplorerPage() {
             />
 
             <div className="mtx-tree-shell">
-              <ViewSettingsContext.Provider value={{ filterText, hideZero }}>
+              <ViewSettingsContext.Provider value={{ filterText, hideZero, showWinRate }}>
                 <NodeBlock
                   node={root}
                   compareNode={compareRoot}
