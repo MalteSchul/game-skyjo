@@ -20,8 +20,9 @@ from dataclasses import dataclass
 from typing import Literal
 from uuid import uuid4
 
-from skyjo.bots.base import Bot
+from skyjo.bots.base import Bot, ObservesActions
 from skyjo.domain.engine import Action, GameState
+from skyjo.domain.observation import Turn
 
 
 class MatchNotFoundError(Exception):
@@ -65,6 +66,18 @@ class MatchNode:
     state: GameState
     seq: int  # creation order, stable across branches
     round_index: int  # rounds completed strictly before this node
+    # JSON-ready search-tree snapshots (see bots.base.ExposesSearchTree,
+    # MctsBot.last_tree_snapshots) behind *this specific node's* move, if it
+    # was chosen by a bot that exposes them - a dict keyed by visit count
+    # (string) at ~0/20/40/60/80/100% search progress, each value a
+    # rl.tree_export.tree_to_dict export - captured once, at the moment this
+    # node is created (see MatchStore.apply_autoplay_action), and never
+    # touched again. Kept per-node rather than only on the bot instance
+    # (which only remembers its single most recent decision) so history
+    # navigation can show the tree behind any past bot move, not just its
+    # latest one. None for a human move, a bot with no real search, or a
+    # node that isn't an action at all (root/next_round).
+    mcts_tree: dict | None = None
 
 
 class _MatchTree:
@@ -94,7 +107,12 @@ class _MatchTree:
         self.autoplay_event: threading.Event | None = None
 
     def _add_node(
-        self, parent_id: str | None, edge: Edge | None, actor: int | None, state: GameState
+        self,
+        parent_id: str | None,
+        edge: Edge | None,
+        actor: int | None,
+        state: GameState,
+        mcts_tree: dict | None = None,
     ) -> MatchNode:
         round_index = 0
         if parent_id is not None:
@@ -109,6 +127,7 @@ class _MatchTree:
             state=state,
             seq=self._next_seq,
             round_index=round_index,
+            mcts_tree=mcts_tree,
         )
         self._next_seq += 1
         self.nodes[node.node_id] = node
@@ -126,10 +145,13 @@ class _MatchTree:
     def head(self) -> MatchNode:
         return self.nodes[self.head_id]
 
-    def advance(self, edge: Edge, compute_state) -> MatchNode:
+    def advance(self, edge: Edge, compute_state, mcts_tree: dict | None = None) -> MatchNode:
         """Move the head forward via `edge`, reusing the existing child if this
         exact edge was already taken from the head before instead of recomputing
-        (state transitions are deterministic given a starting state and edge)."""
+        (state transitions are deterministic given a starting state and edge).
+        `mcts_tree` is only ever attached when a *new* node is actually created -
+        replaying an existing edge keeps whatever that node already has, since
+        it was captured at that node's original creation time."""
         parent = self.head()
         existing = self.children[parent.node_id].get(edge)
         if existing is not None:
@@ -138,7 +160,7 @@ class _MatchTree:
 
         new_state = compute_state(parent.state)
         actor = parent.state.current_player if edge.kind == "action" else None
-        node = self._add_node(parent_id=parent.node_id, edge=edge, actor=actor, state=new_state)
+        node = self._add_node(parent_id=parent.node_id, edge=edge, actor=actor, state=new_state, mcts_tree=mcts_tree)
         self.head_id = node.node_id
         return node
 
@@ -181,6 +203,14 @@ class MatchStore:
             tree = self._tree(match_id)
             return tree.bots[seat]
 
+    def get_node(self, match_id: str, node_id: str) -> MatchNode:
+        """Looks up a node without moving the head - unlike `goto`, purely a
+        read (e.g. for inspecting a history entry's `mcts_tree` without
+        actually navigating the match there)."""
+        with self._lock:
+            tree = self._tree(match_id)
+            return tree.node(node_id)
+
     def get_history(self, match_id: str) -> tuple[list[MatchNode], str, tuple[str, ...]]:
         with self._lock:
             tree = self._tree(match_id)
@@ -201,14 +231,15 @@ class MatchStore:
             return self._advance(tree, Edge(kind="action", action=action), compute_state)
 
     def apply_autoplay_action(
-        self, match_id: str, action: Action, compute_state
+        self, match_id: str, action: Action, compute_state, mcts_tree: dict | None = None
     ) -> tuple[MatchNode, tuple[str, ...], tuple[str, ...]]:
         """Like `apply_action`, but for use only from within the match's own
         autoplay thread (see `trigger_autoplay`), which legitimately holds
-        "thinking" status while it runs."""
+        "thinking" status while it runs. `mcts_tree`, if given, is attached to
+        the resulting node - see `MatchNode.mcts_tree`."""
         with self._lock:
             tree = self._tree(match_id)
-            return self._advance(tree, Edge(kind="action", action=action), compute_state)
+            return self._advance(tree, Edge(kind="action", action=action), compute_state, mcts_tree=mcts_tree)
 
     def start_next_round(self, match_id: str, compute_state) -> tuple[MatchNode, tuple[str, ...], tuple[str, ...]]:
         with self._lock:
@@ -224,10 +255,31 @@ class MatchStore:
             return node, tree.player_names, tree.player_types
 
     def _advance(
-        self, tree: _MatchTree, edge: Edge, compute_state
+        self, tree: _MatchTree, edge: Edge, compute_state, mcts_tree: dict | None = None
     ) -> tuple[MatchNode, tuple[str, ...], tuple[str, ...]]:
-        node = tree.advance(edge, compute_state)
+        parent = tree.head()
+        node = tree.advance(edge, compute_state, mcts_tree=mcts_tree)
+        # Only a real action, landing on a non-terminal state, is a transition
+        # any bot's cached search state could meaningfully advance through -
+        # a next_round edge carries nothing (a fresh round is an independent
+        # shuffle) and a round/game-ending state has no Turn to build at all.
+        if edge.kind == "action" and node.state.phase not in ("round_over", "game_over"):
+            assert edge.action is not None
+            self._notify_bots(tree, parent.state, edge.action, node.state)
         return node, tree.player_names, tree.player_types
+
+    def _notify_bots(
+        self, tree: _MatchTree, state_before: GameState, action: Action, state_after: GameState
+    ) -> None:
+        """Tells every seat's bot - not just whoever acted - that `action`
+        was just taken, so a bot keeping state across turns (`MctsBot`'s
+        cached search tree) can advance it to match the match's real path.
+        See `ObservesActions`."""
+        turn_before = Turn.from_state(state_before)
+        turn_after = Turn.from_state(state_after)
+        for bot in tree.bots:
+            if isinstance(bot, ObservesActions):
+                bot.observe_transition(turn_before, action, turn_after)
 
     def _require_idle(self, tree: _MatchTree) -> None:
         if tree.autoplay_status.status == "thinking":

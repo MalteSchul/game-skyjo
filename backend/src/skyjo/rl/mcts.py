@@ -35,9 +35,10 @@ below it (see `_is_round_closing`/`_advance_round_closing`).
 
 from __future__ import annotations
 
+import inspect
 import math
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -59,7 +60,33 @@ from skyjo.rl.hidden_info import (
 
 # priors: prob per legal (post-collapsing) action, normalized over legal actions only.
 # value: utility vector of length n_act, aligned to player index.
-EvaluateFn = Callable[[GameState], "tuple[dict[Action, float], np.ndarray]"]
+LeafResult = tuple[dict[Action, float], np.ndarray]
+# Minimum contract: one GameState in, one LeafResult out. An implementation
+# may *additionally* accept a keyword-only `turn: Turn | None = None` (see
+# `make_network_evaluator`) - this module already has that leaf's `Turn` on
+# hand (it needs one anyway, for `_expand`'s equivalence-collapsing) and, when
+# the evaluator accepts it, passes it along so `encode_state` doesn't have to
+# re-derive `legal_actions(state)` from scratch to build its mask. Detected
+# once per search via `_accepts_keyword`, not assumed - a plain single-arg
+# evaluator (a test stub, a hand-rolled one) keeps working exactly as before.
+EvaluateFn = Callable[[GameState], LeafResult]
+# Same contract as EvaluateFn, but over many states at once (batch order in,
+# same order out) - one evaluator call instead of one per state. See
+# `run_mcts_batch`. May likewise accept an optional keyword-only `turns`.
+BatchEvaluateFn = Callable[[Sequence[GameState]], "list[LeafResult]"]
+
+
+def _accepts_keyword(fn: Callable, name: str) -> bool:
+    """Whether `fn(..., name=...)` is safe to call: `fn` declares that
+    keyword-only param explicitly, or accepts arbitrary `**kwargs`. Checked
+    once per `run_mcts`/`run_mcts_batch` call (not per leaf/simulation), so
+    the cost of introspecting `fn`'s signature is negligible next to the
+    hundreds of simulations it gates."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 DEFAULT_C_PUCT = 1.5
 DEFAULT_DIRICHLET_ALPHA = 0.3
@@ -71,6 +98,14 @@ class MCTSEdge:
     action: Action
     prior: float
     n_act: int
+    # `prior` as `_expand` first set it, before `_apply_root_noise` (root
+    # edges only) mixes in Dirichlet noise and overwrites `prior` in place -
+    # kept around purely so the raw evaluator output stays inspectable
+    # (e.g. via `tree_export`) after the mix. Equal to `prior` on every
+    # non-root edge, since noise is only ever applied at the root. Defaults
+    # to whatever `prior` was constructed with, for callers (tests, mostly)
+    # that never touch noise at all.
+    prior_before_noise: float | None = None
     visit_count: int = 0
     value_sum: np.ndarray = field(default_factory=lambda: np.zeros(0))
     child: MCTSNode | ChanceNode | None = None
@@ -78,6 +113,8 @@ class MCTSEdge:
     def __post_init__(self) -> None:
         if self.value_sum.shape != (self.n_act,):
             self.value_sum = np.zeros(self.n_act)
+        if self.prior_before_noise is None:
+            self.prior_before_noise = self.prior
 
     def mean_value(self) -> np.ndarray:
         if self.visit_count == 0:
@@ -113,6 +150,15 @@ class MCTSNode:
     is_terminal: bool
     expanded: bool = False
     edges: dict[Action, MCTSEdge] = field(default_factory=dict)
+    # The utility vector this node's own state was assigned when it was
+    # expanded: `evaluate(state)`'s value for a decision node, or
+    # `_terminal_utility` for a terminal one. Purely a record of that one
+    # evaluation - never read back during search (backprop already folded
+    # it into the *parent* edge's `value_sum` at expansion time, see
+    # `_expand_child`) - kept only so a caller (e.g. `tree_export`) can see
+    # what the network itself predicted for a position, not just the
+    # Monte-Carlo average visits produced afterwards. None until expanded.
+    value: np.ndarray | None = None
 
     @property
     def visit_count(self) -> int:
@@ -161,7 +207,8 @@ def _expand(node: MCTSNode, turn: Turn, priors: dict[Action, float]) -> None:
         collapsed[representative] = collapsed.get(representative, 0.0) + prior
 
     node.edges = {
-        action: MCTSEdge(action=action, prior=prior, n_act=node.n_act) for action, prior in collapsed.items()
+        action: MCTSEdge(action=action, prior=prior, n_act=node.n_act)
+        for action, prior in collapsed.items()
     }
     node.expanded = True
 
@@ -192,36 +239,89 @@ def _select_edge(node: MCTSNode, c_puct: float) -> MCTSEdge:
             best_score = score
             best_edge = edge
 
-    assert best_edge is not None, "_select_edge: node has no edges - should never be called on a leaf"
+    assert best_edge is not None, (
+        "_select_edge: node has no edges - should never be called on a leaf"
+    )
     return best_edge
 
 
-def _expand_child(state: GameState, evaluate: EvaluateFn, n_act: int) -> tuple[MCTSNode, np.ndarray]:
-    terminal = _is_terminal(state)
-    child = MCTSNode(state=state, n_act=n_act, is_terminal=terminal)
-    if terminal:
-        return child, _terminal_utility(state.total_scores)
+def _leaf_node(
+    state: GameState, n_act: int
+) -> Generator[tuple[GameState, Turn], LeafResult, tuple[MCTSNode, np.ndarray]]:
+    """Builds the `MCTSNode` for a freshly-reached leaf `state`.
 
-    priors, value = evaluate(state)
-    _expand(child, Turn.from_state(state), priors)
+    A terminal state resolves immediately from the true final standings - no
+    evaluation needed, so this never yields for one. Otherwise it computes
+    this leaf's `Turn` once - needed regardless, for `_expand`'s equivalence
+    collapsing - and yields `(state, turn)` exactly once, expecting the
+    evaluator's `(priors, value)` result sent back (via `.send`) to finish
+    building the node. That single `yield` is the seam that lets a caller
+    batch this evaluation together with other trees' pending leaves
+    (`run_mcts_batch`) instead of every leaf calling an evaluator on its own -
+    see `_drive_gen` for the unbatched side of that same seam. Handing the
+    same `turn` object to the driver too (rather than it recomputing one) is
+    what lets an evaluator that accepts `turn`/`turns` skip re-deriving
+    `legal_actions(state)` a second time for this same leaf.
+    """
+    if _is_terminal(state):
+        child = MCTSNode(state=state, n_act=n_act, is_terminal=True)
+        child.value = _terminal_utility(state.total_scores)
+        return child, child.value
+
+    turn = Turn.from_state(state)
+    priors, value = yield state, turn
+    child = MCTSNode(state=state, n_act=n_act, is_terminal=False)
+    _expand(child, turn, priors)
+    child.value = value
     return child, value
+
+
+def _drive_gen(
+    gen: Generator[tuple[GameState, Turn], LeafResult, None], evaluate: EvaluateFn, *, supports_turn: bool
+) -> None:
+    """Eagerly resolves a `_simulate_once_gen` generator with a synchronous,
+    one-state-at-a-time `evaluate` call - this is what makes unbatched search
+    (`_simulate_once`) and batched search (`run_mcts_batch`) run the exact
+    same tree-walk code, just driven differently: one leaf at a time here,
+    many trees' leaves together there. `supports_turn` - from `_accepts_keyword`,
+    checked once per search rather than once per leaf - decides whether the
+    leaf's already-computed `Turn` is worth passing to `evaluate` at all.
+    """
+    try:
+        leaf_state, turn = next(gen)
+    except StopIteration:
+        return  # resolved without an evaluation (a cached-terminal leaf)
+    result = evaluate(leaf_state, turn=turn) if supports_turn else evaluate(leaf_state)
+    try:
+        gen.send(result)
+    except StopIteration:
+        return
+    raise AssertionError("_drive_gen: generator yielded more than once")
 
 
 def _is_round_closing(state: GameState, action: Action) -> bool:
     return will_close_round(state, action)
 
 
+# All three `_advance_*` helpers below pass `validate=False` to `apply_action`:
+# every `action` they're given is `edge.action` from `_select_edge`, i.e. it
+# came out of this exact `state`'s own `node.edges` (built from
+# `Turn.from_state(state).legal_actions` in `_expand`) - re-checking
+# `action in legal_actions(state)` here would just recompute a list this
+# module already knows `action` is a member of, on every single simulated
+# transition (profiling: legal_actions was ~3x more often than leaves
+# expanded before this).
 def _advance_deterministic(state: GameState, action: Action) -> GameState:
     """Neither a reveal nor round-closing: nothing hidden is involved."""
-    return rescrub(apply_action(state, action))
+    return rescrub(apply_action(state, action, validate=False))
 
 
 def _advance_resolved_reveal(state: GameState, action: Action, value: int) -> GameState:
     """A single-card reveal, already resolved to `value` by a ChanceEdge."""
     if action.type is ActionType.DRAW_STOCK:
-        return rescrub(resolve_drawn_stock_card(apply_action(state, action), value))
+        return rescrub(resolve_drawn_stock_card(apply_action(state, action, validate=False), value))
     primed = resolve_reveal(state, action, value)
-    return rescrub(apply_action(primed, action))
+    return rescrub(apply_action(primed, action, validate=False))
 
 
 def _advance_round_closing(state: GameState, action: Action, rng: np.random.Generator) -> GameState:
@@ -239,13 +339,23 @@ def _advance_round_closing(state: GameState, action: Action, rng: np.random.Gene
         already_resolved = (state.current_player, action.position)
 
     patched = resolve_round_close(patched, rng, already_resolved=already_resolved)
-    next_state = rescrub(apply_action(patched, action))
+    next_state = rescrub(apply_action(patched, action, validate=False))
     while next_state.phase == "round_over":
         next_state = rescrub(start_next_round(next_state))
     return next_state
 
 
-def _simulate_once(root: MCTSNode, evaluate: EvaluateFn, c_puct: float, rng: np.random.Generator) -> None:
+def _simulate_once_gen(
+    root: MCTSNode, c_puct: float, rng: np.random.Generator
+) -> Generator[GameState, LeafResult, None]:
+    """Generator form of one simulation: walks the tree exactly as before,
+    pausing at `yield` only where the walk reaches a leaf that genuinely
+    needs an evaluation (`_leaf_node` resolves a cached-terminal leaf without
+    yielding at all). `_simulate_once` (via `_drive_gen`) and `run_mcts_batch`
+    both drive this same walk - one leaf at a time, or many trees' leaves
+    batched together - so the tree-walk logic lives in exactly one place
+    regardless of which driver is used.
+    """
     path: list[MCTSEdge | ChanceEdge] = []
     node = root
 
@@ -260,13 +370,15 @@ def _simulate_once(root: MCTSNode, evaluate: EvaluateFn, c_puct: float, rng: np.
             # average over many independently sampled continuations rather
             # than one frozen future (see module docstring).
             child_state = _advance_round_closing(state, edge.action, rng)
-            child, value = _expand_child(child_state, evaluate, node.n_act)
+            _, value = yield from _leaf_node(child_state, node.n_act)
             break
 
         if is_reveal(state, edge.action):
             chance = edge.child
             if not isinstance(chance, ChanceNode):
-                chance = ChanceNode(n_act=node.n_act, counts=unknown_card_counts(Turn.from_state(state)))
+                chance = ChanceNode(
+                    n_act=node.n_act, counts=unknown_card_counts(Turn.from_state(state))
+                )
                 edge.child = chance
 
             sampled_value = sample_reveal(chance.counts, rng)
@@ -283,7 +395,7 @@ def _simulate_once(root: MCTSNode, evaluate: EvaluateFn, c_puct: float, rng: np.
 
             if chance_edge.child is None:
                 child_state = _advance_resolved_reveal(state, edge.action, sampled_value)
-                child, value = _expand_child(child_state, evaluate, node.n_act)
+                child, value = yield from _leaf_node(child_state, node.n_act)
                 chance_edge.child = child
                 break
             if chance_edge.child.is_terminal:
@@ -295,7 +407,7 @@ def _simulate_once(root: MCTSNode, evaluate: EvaluateFn, c_puct: float, rng: np.
         # Deterministic: neither a reveal nor round-closing.
         if not isinstance(edge.child, MCTSNode):
             child_state = _advance_deterministic(state, edge.action)
-            child, value = _expand_child(child_state, evaluate, node.n_act)
+            child, value = yield from _leaf_node(child_state, node.n_act)
             edge.child = child
             break
         if edge.child.is_terminal:
@@ -308,6 +420,17 @@ def _simulate_once(root: MCTSNode, evaluate: EvaluateFn, c_puct: float, rng: np.
         visited.value_sum += value
 
 
+def _simulate_once(
+    root: MCTSNode,
+    evaluate: EvaluateFn,
+    c_puct: float,
+    rng: np.random.Generator,
+    *,
+    supports_turn: bool,
+) -> None:
+    _drive_gen(_simulate_once_gen(root, c_puct, rng), evaluate, supports_turn=supports_turn)
+
+
 def run_mcts(
     root_turn: Turn,
     evaluate: EvaluateFn,
@@ -318,24 +441,144 @@ def run_mcts(
     dirichlet_epsilon: float = DEFAULT_DIRICHLET_EPSILON,
     add_root_noise: bool = True,
     rng: np.random.Generator | None = None,
+    on_simulation: Callable[[int], None] | None = None,
+    on_root_ready: Callable[[MCTSNode], None] | None = None,
+    reuse_root: MCTSNode | None = None,
 ) -> MCTSNode:
+    """`on_root_ready`, if given, fires exactly once - after the root is
+    expanded and root noise applied, before the first simulation - with the
+    same `MCTSNode` object this call will keep mutating and eventually
+    return. It exists so a caller can snapshot the tree mid-search (e.g. via
+    `on_simulation`) without waiting for `run_mcts` to return: the object it
+    receives *is* the live root, not a copy.
+
+    `reuse_root`, if given, must already be an expanded `MCTSNode` whose own
+    `.state` is exactly `gamestate_from_turn(root_turn)` - e.g. a child pulled
+    out of a previous `run_mcts` call's tree once the game has genuinely
+    advanced to that position (see `bots.mcts_bot.MctsBot`, the only current
+    caller). Search resumes from its existing edges/visit-counts instead of
+    expanding a fresh root, and `num_simulations` more are layered on top of
+    whatever it already has - the standard "carry the subtree forward" reuse
+    an AlphaZero-style search can do once the real game reaches a position it
+    already explored. Raises ValueError if the state doesn't match: this is a
+    last-resort consistency guard, not the primary safety mechanism - a
+    caller is expected to have already verified the position genuinely
+    advanced from `reuse_root`'s own state (`MctsBot` does, via its own
+    tree-walk) before ever passing one in.
+    """
     if num_simulations < 0:
         raise ValueError("run_mcts: num_simulations must be >= 0")
     rng = rng if rng is not None else np.random.default_rng()
 
     n_act = len(root_turn.boards)
     root_state = gamestate_from_turn(root_turn)
-    root = MCTSNode(state=root_state, n_act=n_act, is_terminal=False)
+    supports_turn = _accepts_keyword(evaluate, "turn")
 
-    priors, _ = evaluate(root_state)
-    _expand(root, root_turn, priors)
-    if add_root_noise:
-        _apply_root_noise(root, dirichlet_alpha, dirichlet_epsilon, rng)
+    if reuse_root is not None:
+        if reuse_root.state != root_state:
+            raise ValueError("run_mcts: reuse_root.state does not match gamestate_from_turn(root_turn)")
+        root = reuse_root
+        if add_root_noise:
+            _apply_root_noise(root, dirichlet_alpha, dirichlet_epsilon, rng)
+    else:
+        root = MCTSNode(state=root_state, n_act=n_act, is_terminal=False)
+        priors, value = evaluate(root_state, turn=root_turn) if supports_turn else evaluate(root_state)
+        _expand(root, root_turn, priors)
+        root.value = value
+        if add_root_noise:
+            _apply_root_noise(root, dirichlet_alpha, dirichlet_epsilon, rng)
 
-    for _ in range(num_simulations):
-        _simulate_once(root, evaluate, c_puct, rng)
+    if on_root_ready is not None:
+        on_root_ready(root)
+
+    for i in range(num_simulations):
+        _simulate_once(root, evaluate, c_puct, rng, supports_turn=supports_turn)
+        if on_simulation is not None:
+            on_simulation(i + 1)
 
     return root
+
+
+def run_mcts_batch(
+    root_turns: Sequence[Turn],
+    evaluate_batch: BatchEvaluateFn,
+    *,
+    num_simulations: int,
+    c_puct: float = DEFAULT_C_PUCT,
+    dirichlet_alpha: float = DEFAULT_DIRICHLET_ALPHA,
+    dirichlet_epsilon: float = DEFAULT_DIRICHLET_EPSILON,
+    add_root_noise: bool = True,
+    rngs: Sequence[np.random.Generator] | None = None,
+) -> list[MCTSNode]:
+    """Runs `len(root_turns)` independent searches side by side - one root
+    per turn - batching every round's leaf evaluations into a single
+    `evaluate_batch` call instead of evaluating each tree's leaf on its own.
+
+    The trees never interact: this produces exactly what running `run_mcts`
+    once per turn would (same tree-walk code, see `_simulate_once_gen`), just
+    with every round's `len(root_turns)` pending leaves - one per still-active
+    tree - handed to the evaluator together. It exists purely for network-call
+    throughput (batch-of-N is far cheaper per-state than N calls of batch-1),
+    not search quality or depth.
+
+    Every root advances by exactly `num_simulations` simulations. A root that
+    resolves a simulation without needing an evaluation (a cached-terminal
+    leaf, same as the unbatched path) simply contributes nothing to that
+    round's batch, which can shrink accordingly.
+    """
+    if num_simulations < 0:
+        raise ValueError("run_mcts_batch: num_simulations must be >= 0")
+    if not root_turns:
+        return []
+    rngs = list(rngs) if rngs is not None else [np.random.default_rng() for _ in root_turns]
+    if len(rngs) != len(root_turns):
+        raise ValueError("run_mcts_batch: rngs must be the same length as root_turns")
+
+    roots = [
+        MCTSNode(state=gamestate_from_turn(turn), n_act=len(turn.boards), is_terminal=False)
+        for turn in root_turns
+    ]
+    supports_turns = _accepts_keyword(evaluate_batch, "turns")
+
+    root_states = [root.state for root in roots]
+    root_results = (
+        evaluate_batch(root_states, turns=root_turns) if supports_turns else evaluate_batch(root_states)
+    )
+    for root, turn, (priors, value), rng in zip(roots, root_turns, root_results, rngs, strict=True):
+        _expand(root, turn, priors)
+        root.value = value
+        if add_root_noise:
+            _apply_root_noise(root, dirichlet_alpha, dirichlet_epsilon, rng)
+
+    for _ in range(num_simulations):
+        gens = [_simulate_once_gen(root, c_puct, rng) for root, rng in zip(roots, rngs, strict=True)]
+        pending_indices: list[int] = []
+        pending_states: list[GameState] = []
+        pending_turns: list[Turn] = []
+        for i, gen in enumerate(gens):
+            try:
+                state, turn = next(gen)
+                pending_states.append(state)
+                pending_turns.append(turn)
+                pending_indices.append(i)
+            except StopIteration:
+                pass  # resolved without an evaluation (a cached-terminal leaf)
+
+        if not pending_states:
+            continue
+        results = (
+            evaluate_batch(pending_states, turns=pending_turns)
+            if supports_turns
+            else evaluate_batch(pending_states)
+        )
+        for i, result in zip(pending_indices, results, strict=True):
+            try:
+                gens[i].send(result)
+            except StopIteration:
+                continue
+            raise AssertionError("run_mcts_batch: a simulation yielded more than once")
+
+    return roots
 
 
 def visit_distribution(root: MCTSNode, tau: float = 1.0) -> dict[Action, float]:
@@ -361,3 +604,90 @@ def sample_action(pi: dict[Action, float], rng: np.random.Generator) -> Action:
     probs = probs / probs.sum()
     index = rng.choice(len(actions), p=probs)
     return actions[index]
+
+
+def greedy_action(root: MCTSNode, rng: np.random.Generator) -> Action:
+    """Most-visited root action - the search's actual best line, for a live
+    bot/eval opponent rather than self-play's tau-sampled training targets.
+
+    Ties (common against an uninformative/untrained evaluator, e.g. every
+    edge visited once) are broken randomly rather than always taking the
+    same "first" edge: a deterministic tie-break can lock two such players
+    into repeating the same tied pair of actions forever (e.g.
+    draw-then-discard, never placing) since nothing about the state that
+    matters to the tie ever changes turn to turn.
+    """
+    if not root.edges:
+        raise ValueError("greedy_action: root has no legal actions (terminal or unexpanded)")
+    visits = {action: edge.visit_count for action, edge in root.edges.items()}
+    max_visits = max(visits.values())
+    best_actions = [action for action, count in visits.items() if count == max_visits]
+    return best_actions[0] if len(best_actions) == 1 else best_actions[rng.integers(len(best_actions))]
+
+
+def infer_revealed_value(turn_before: Turn, action: Action, turn_after: Turn) -> int | None:
+    """Best-effort recovery of the real value `action` revealed, purely from
+    public `Turn` fields `turn_after` already exposes - never anything a
+    cache-reusing caller wasn't already entitled to see. Returns None
+    whenever it can't be recovered with confidence (e.g. an immediate
+    column-clear already wiped the very position that would have shown it)
+    - a safe answer `advance_cached_root` treats exactly like any other
+    cache miss.
+    """
+    if action.type is ActionType.DRAW_STOCK:
+        # Still the same acting player's turn (awaiting_placement next), and
+        # a drawn card sits in `drawn_card` until it's placed or discarded.
+        return turn_after.drawn_card
+    if action.position is None:
+        return None
+    card = turn_after.boards[turn_before.acting_player].cards[action.position]
+    return card.value if card is not None and card.face_up else None
+
+
+def advance_cached_root(
+    cached_root: MCTSNode | None, turn_before: Turn, action: Action, turn_after: Turn
+) -> MCTSNode | None:
+    """Advances a previously-searched tree by one real transition - `action`,
+    taken by whichever seat `turn_before.acting_player` was - to whatever
+    subtree already covers the resulting position, or None if nothing
+    safely does.
+
+    Shared by `bots.mcts_bot.MctsBot.observe_transition` (a live bot
+    tracking its own cache across a real match) and
+    `evaluator._play_one_eval_game` (the same idea for a `HeuristicBot`
+    opponent's moves during evaluation) - both need the identical safe
+    tree-walk, just from different callers, neither of which should
+    duplicate it.
+
+    Every branch either finds the exact already-visited child that `action`
+    (and, for a reveal, its real resolved value) leads to, or returns None -
+    there's no partial/uncertain middle ground, since an incorrect reuse
+    would corrupt the search silently while a missed one only costs some
+    redundant computation next time.
+    """
+    if cached_root is None:
+        return None
+    state = cached_root.state
+    if gamestate_from_turn(turn_before) != state:
+        return None
+
+    representative = group_representatives(turn_before).get(action, action)
+    edge = cached_root.edges.get(representative)
+    if edge is None or edge.child is None or will_close_round(state, action):
+        # Round-closing is never cached on its edge in the first place (see
+        # this module's docstring) - nothing to carry forward.
+        return None
+
+    if is_reveal(state, action):
+        chance = edge.child
+        revealed_value = infer_revealed_value(turn_before, action, turn_after)
+        chance_edge = (
+            chance.edges.get(revealed_value)
+            if isinstance(chance, ChanceNode) and revealed_value is not None
+            else None
+        )
+        child = chance_edge.child if chance_edge is not None else None
+    else:
+        child = edge.child if isinstance(edge.child, MCTSNode) else None
+
+    return child if isinstance(child, MCTSNode) and not child.is_terminal else None

@@ -25,21 +25,23 @@ def test_forward_pass_works_for_every_active_count_from_2_to_8_in_one_batch():
     net = _tiny_net()
     features, mask, active_count = _random_batch(7, [2, 3, 4, 5, 6, 7, 8])
 
-    policy_probs, rank_probs, utility = net(features, mask, active_count)
+    policy_probs, rank_probs, utility, points_pred = net(features, mask, active_count)
 
     assert policy_probs.shape == (7, ACTION_SPACE_SIZE)
     assert rank_probs.shape == (7, N_MAX_PLAYERS, N_MAX_PLAYERS)
     assert utility.shape == (7, N_MAX_PLAYERS)
+    assert points_pred.shape == (7, N_MAX_PLAYERS)
     assert torch.isfinite(policy_probs).all()
     assert torch.isfinite(rank_probs).all()
     assert torch.isfinite(utility).all()
+    assert torch.isfinite(points_pred).all()
 
 
 def test_policy_probs_are_zero_off_the_mask_and_sum_to_one_on_it():
     net = _tiny_net()
     features, mask, active_count = _random_batch(4, [2, 4, 6, 8])
 
-    policy_probs, _, _ = net(features, mask, active_count)
+    policy_probs, _, _, _ = net(features, mask, active_count)
 
     assert torch.allclose(policy_probs.sum(dim=-1), torch.ones(4), atol=1e-5)
     assert torch.all(policy_probs[~mask] < 1e-6)
@@ -49,7 +51,7 @@ def test_rank_probs_active_rows_sum_to_one_and_inactive_rows_are_exactly_zero():
     net = _tiny_net()
     features, mask, active_count = _random_batch(3, [2, 5, 8])
 
-    _, rank_probs, _ = net(features, mask, active_count)
+    _, rank_probs, _, _ = net(features, mask, active_count)
 
     for b, n_act in enumerate([2, 5, 8]):
         active_rows = rank_probs[b, :n_act, :]
@@ -63,9 +65,18 @@ def test_utility_is_zero_for_players_beyond_active_count():
     net = _tiny_net()
     features, mask, active_count = _random_batch(2, [3, 8])
 
-    _, _, utility = net(features, mask, active_count)
+    _, _, utility, _ = net(features, mask, active_count)
 
     assert torch.all(utility[0, 3:] == 0.0)
+
+
+def test_points_pred_is_zero_for_players_beyond_active_count():
+    net = _tiny_net()
+    features, mask, active_count = _random_batch(2, [3, 8])
+
+    _, _, _, points_pred = net(features, mask, active_count)
+
+    assert torch.all(points_pred[0, 3:] == 0.0)
 
 
 # --- gradient isolation: verification criterion 3 -----------------------------

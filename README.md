@@ -33,3 +33,11 @@ docker compose up --build
 ```
 - Frontend: http://localhost:3000
 - Backend: http://localhost:8000/health
+
+## Developer tools
+
+- **MCTS Tree Explorer** (`/tools/mcts-tree`, e.g. http://localhost:5173/tools/mcts-tree) — loads a JSON export from
+  `backend/scripts/dump_mcts_tree.py` and lets you browse it interactively: visit shares, priors, Q/U/PUCT, a
+  scrubber across simulation-count snapshots, "compare against" deltas, and a move-preference-over-time chart. Not
+  linked from the game UI — it's a standalone route for inspecting `mcts_bot` search trees, source in
+  `frontend/src/tools/mcts-tree/`.

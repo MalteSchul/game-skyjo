@@ -59,14 +59,23 @@ def unknown_card_counts(turn: Turn) -> Counter[int]:
     """Deck composition minus every card whose value is currently public.
 
     Public = every face-up board card (across all players) + the entire
-    discard pile. Everything else - remaining stock, still-face-down board
-    cards - is, by conservation, exactly what's left; see module docstring
-    for why they're pooled together rather than tracked separately.
+    discard pile + the drawn card in hand, if any. The drawn card matters:
+    it's already been resolved to a real value (via its own earlier reveal),
+    so it is genuinely known - but it sits in `turn.drawn_card`, not in
+    `boards` or `discard`, until it's placed or discarded. Omitting it here
+    let the same value be sampled again for some other still-hidden card,
+    minting a phantom duplicate that only trips the conservation assert once
+    enough of them accumulate for one value to exceed the deck's true count.
+    Everything else - remaining stock, still-face-down board cards - is, by
+    conservation, exactly what's left; see module docstring for why they're
+    pooled together rather than tracked separately.
     """
-    return _unknown_from_boards_and_discard(turn.boards, turn.discard)
+    return _unknown_from_boards_and_discard(turn.boards, turn.discard, turn.drawn_card)
 
 
-def _unknown_from_boards_and_discard(boards: tuple[BoardView, ...], discard: tuple[int, ...]) -> Counter[int]:
+def _unknown_from_boards_and_discard(
+    boards: tuple[BoardView, ...], discard: tuple[int, ...], drawn_card: int | None = None
+) -> Counter[int]:
     counts: Counter[int] = Counter(dict(CARD_COUNTS))
     for board in boards:
         for card in board.cards:
@@ -74,6 +83,8 @@ def _unknown_from_boards_and_discard(boards: tuple[BoardView, ...], discard: tup
                 counts[card.value] -= 1
     for value in discard:
         counts[value] -= 1
+    if drawn_card is not None:
+        counts[drawn_card] -= 1
 
     assert all(count >= 0 for count in counts.values()), (
         "_unknown_from_boards_and_discard: a card is counted as both public and "
@@ -155,7 +166,7 @@ def resolve_round_close(
     it isn't redrawn out from under that value.
     """
     boards_as_views = tuple(BoardView.from_board(b) for b in state.boards)
-    counts = _unknown_from_boards_and_discard(boards_as_views, state.discard)
+    counts = _unknown_from_boards_and_discard(boards_as_views, state.discard, state.drawn_card)
     if already_resolved is not None:
         player, position = already_resolved
         resolved_value = state.boards[player].cards[position].value

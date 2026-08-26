@@ -1,3 +1,4 @@
+from collections import Counter
 from dataclasses import replace
 
 import numpy as np
@@ -16,12 +17,16 @@ from skyjo.domain.engine import legal_actions as engine_legal_actions
 from skyjo.domain.observation import Turn
 from skyjo.rl import hidden_info, mcts
 from skyjo.rl.mcts import (
+    ChanceEdge,
     ChanceNode,
     MCTSEdge,
     MCTSNode,
+    _accepts_keyword,
     _select_edge,
     _terminal_utility,
+    greedy_action,
     run_mcts,
+    run_mcts_batch,
     sample_action,
     visit_distribution,
 )
@@ -46,9 +51,90 @@ def _board_from_values(values, *, face_up: bool = False) -> PlayerBoard:
 def test_root_total_visit_count_equals_num_simulations():
     state = new_match(player_count=3, seed=1)
 
-    root = run_mcts(Turn.from_state(state), _uniform_evaluate, num_simulations=25, rng=np.random.default_rng(0))
+    root = run_mcts(
+        Turn.from_state(state), _uniform_evaluate, num_simulations=25, rng=np.random.default_rng(0)
+    )
 
     assert root.visit_count == 25
+
+
+def test_on_simulation_is_called_once_per_simulation_with_a_1_indexed_step():
+    state = new_match(player_count=2, seed=1)
+    steps: list[int] = []
+
+    run_mcts(
+        Turn.from_state(state),
+        _uniform_evaluate,
+        num_simulations=5,
+        rng=np.random.default_rng(0),
+        on_simulation=steps.append,
+    )
+
+    assert steps == [1, 2, 3, 4, 5]
+
+
+def test_on_simulation_is_never_called_for_zero_simulations():
+    state = new_match(player_count=2, seed=1)
+    steps: list[int] = []
+
+    run_mcts(
+        Turn.from_state(state),
+        _uniform_evaluate,
+        num_simulations=0,
+        rng=np.random.default_rng(0),
+        on_simulation=steps.append,
+    )
+
+    assert steps == []
+
+
+def test_on_root_ready_fires_once_with_an_already_expanded_root_before_any_simulation():
+    state = new_match(player_count=2, seed=1)
+    call_count = 0
+    visit_count_at_ready: int | None = None
+
+    def on_root_ready(root: MCTSNode) -> None:
+        nonlocal call_count, visit_count_at_ready
+        call_count += 1
+        visit_count_at_ready = root.visit_count
+        assert root.expanded
+
+    run_mcts(
+        Turn.from_state(state),
+        _uniform_evaluate,
+        num_simulations=3,
+        rng=np.random.default_rng(0),
+        on_root_ready=on_root_ready,
+    )
+
+    assert call_count == 1
+    assert visit_count_at_ready == 0
+
+
+def test_on_root_ready_hands_back_the_same_live_object_run_mcts_returns():
+    state = new_match(player_count=2, seed=1)
+    ready_roots: list[MCTSNode] = []
+
+    returned_root = run_mcts(
+        Turn.from_state(state),
+        _uniform_evaluate,
+        num_simulations=5,
+        rng=np.random.default_rng(0),
+        on_root_ready=ready_roots.append,
+    )
+
+    assert ready_roots[0] is returned_root
+    assert returned_root.visit_count == 5
+
+
+def test_on_root_ready_is_optional():
+    state = new_match(player_count=2, seed=1)
+
+    root = run_mcts(
+        Turn.from_state(state), _uniform_evaluate, num_simulations=2, rng=np.random.default_rng(0)
+    )
+
+    assert root.visit_count == 2
 
 
 def test_run_mcts_rejects_negative_simulation_count():
@@ -82,13 +168,25 @@ def test_root_noise_only_perturbs_priors_for_legal_actions_and_still_sums_to_one
         state = apply_action(state, engine_legal_actions(state)[0])
     turn = Turn.from_state(state)
 
-    noisy = run_mcts(turn, _uniform_evaluate, num_simulations=0, add_root_noise=True, rng=np.random.default_rng(1))
-    clean = run_mcts(turn, _uniform_evaluate, num_simulations=0, add_root_noise=False, rng=np.random.default_rng(1))
+    noisy = run_mcts(
+        turn,
+        _uniform_evaluate,
+        num_simulations=0,
+        add_root_noise=True,
+        rng=np.random.default_rng(1),
+    )
+    clean = run_mcts(
+        turn,
+        _uniform_evaluate,
+        num_simulations=0,
+        add_root_noise=False,
+        rng=np.random.default_rng(1),
+    )
 
     assert set(noisy.edges.keys()) == set(clean.edges.keys())
-    assert any(
-        abs(noisy.edges[a].prior - clean.edges[a].prior) > 1e-9 for a in clean.edges
-    ), "noise should change at least one legal action's prior"
+    assert any(abs(noisy.edges[a].prior - clean.edges[a].prior) > 1e-9 for a in clean.edges), (
+        "noise should change at least one legal action's prior"
+    )
     assert sum(e.prior for e in noisy.edges.values()) == pytest.approx(1.0)
 
 
@@ -107,7 +205,10 @@ def test_select_edge_uses_the_node_current_players_q_component_not_always_player
         favors_player_1 = MCTSEdge(action=engine_legal_actions(node_state)[1], prior=0.5, n_act=2)
         favors_player_1.visit_count = 1
         favors_player_1.value_sum = np.array([0.0, 10.0])
-        node.edges = {favors_player_0.action: favors_player_0, favors_player_1.action: favors_player_1}
+        node.edges = {
+            favors_player_0.action: favors_player_0,
+            favors_player_1.action: favors_player_1,
+        }
         return node
 
     root_node = node_with_edges(current_player=0)
@@ -148,7 +249,9 @@ def test_final_ranks_breaks_ties_by_lower_player_index():
 
 def test_visit_distribution_sums_to_one_and_favors_more_visited_actions():
     state = new_match(player_count=2, seed=3)
-    root = run_mcts(Turn.from_state(state), _uniform_evaluate, num_simulations=20, rng=np.random.default_rng(0))
+    root = run_mcts(
+        Turn.from_state(state), _uniform_evaluate, num_simulations=20, rng=np.random.default_rng(0)
+    )
 
     pi = visit_distribution(root, tau=1.0)
 
@@ -159,7 +262,9 @@ def test_visit_distribution_sums_to_one_and_favors_more_visited_actions():
 
 def test_visit_distribution_near_zero_tau_is_one_hot_on_the_most_visited_action():
     state = new_match(player_count=2, seed=3)
-    root = run_mcts(Turn.from_state(state), _uniform_evaluate, num_simulations=20, rng=np.random.default_rng(0))
+    root = run_mcts(
+        Turn.from_state(state), _uniform_evaluate, num_simulations=20, rng=np.random.default_rng(0)
+    )
 
     pi = visit_distribution(root, tau=1e-6)
 
@@ -199,7 +304,9 @@ def test_repeated_visits_to_a_reveal_edge_sample_more_than_one_value():
     flip_action = next(a for a in root.edges if a.type is ActionType.FLIP_INITIAL)
     chance = root.edges[flip_action].child
     assert isinstance(chance, ChanceNode)
-    assert len(chance.edges) > 1, "60 simulations through ~149 unknown cards should not all sample the same value"
+    assert len(chance.edges) > 1, (
+        "60 simulations through ~149 unknown cards should not all sample the same value"
+    )
 
 
 def test_chance_node_never_offers_a_value_with_zero_remaining_count():
@@ -300,3 +407,396 @@ def test_search_through_a_round_closing_edge_backs_up_bounded_utility():
         assert np.all(np.isfinite(edge.mean_value()))
         assert np.all(edge.mean_value() >= -1.0 - 1e-6)
         assert np.all(edge.mean_value() <= 1.0 + 1e-6)
+
+
+# --- run_mcts_batch --------------------------------------------------------
+
+
+def _batch_evaluate(states):
+    return [_uniform_evaluate(s) for s in states]
+
+
+def test_run_mcts_batch_matches_running_run_mcts_once_per_tree():
+    # Batching only changes *when* the evaluator is called, never what it's
+    # called with or what comes back - so a tree searched inside a batch of
+    # several must land on exactly the same edges/visit-counts as the same
+    # (turn, rng-seed) pair searched alone via run_mcts.
+    state_a = new_match(player_count=2, seed=1)
+    state_b = new_match(player_count=3, seed=2)
+    turn_a, turn_b = Turn.from_state(state_a), Turn.from_state(state_b)
+
+    root_a = run_mcts(turn_a, _uniform_evaluate, num_simulations=30, rng=np.random.default_rng(10), add_root_noise=False)
+    root_b = run_mcts(turn_b, _uniform_evaluate, num_simulations=30, rng=np.random.default_rng(20), add_root_noise=False)
+
+    batched_a, batched_b = run_mcts_batch(
+        [turn_a, turn_b],
+        _batch_evaluate,
+        num_simulations=30,
+        rngs=[np.random.default_rng(10), np.random.default_rng(20)],
+        add_root_noise=False,
+    )
+
+    assert batched_a.visit_count == root_a.visit_count == 30
+    assert batched_b.visit_count == root_b.visit_count == 30
+    assert {a: e.visit_count for a, e in batched_a.edges.items()} == {
+        a: e.visit_count for a, e in root_a.edges.items()
+    }
+    assert {a: e.visit_count for a, e in batched_b.edges.items()} == {
+        a: e.visit_count for a, e in root_b.edges.items()
+    }
+    for action, edge in batched_a.edges.items():
+        assert np.allclose(edge.mean_value(), root_a.edges[action].mean_value())
+
+
+def test_run_mcts_batch_handles_a_mix_of_cached_terminal_and_live_leaves():
+    # _near_closing_state's board is one PLACE away from ending the game
+    # outright (see test_advance_round_closing_never_leaks_the_hidden_sentinel...
+    # above) - pairing it with a fresh match means, within the same batch,
+    # some rounds' pending leaves resolve without any evaluation (cached
+    # terminal) while others still need one, exercising run_mcts_batch's
+    # per-round "batch can shrink" path.
+    closing_state = _near_closing_state(target_score=50)
+    fresh_state = new_match(player_count=2, seed=5)
+    turns = [Turn.from_state(closing_state), Turn.from_state(fresh_state)]
+
+    roots = run_mcts_batch(
+        turns,
+        _batch_evaluate,
+        num_simulations=20,
+        rngs=[np.random.default_rng(1), np.random.default_rng(2)],
+        add_root_noise=False,
+    )
+
+    assert len(roots) == 2
+    for root in roots:
+        assert root.visit_count == 20
+        for edge in root.edges.values():
+            assert np.all(np.isfinite(edge.mean_value()))
+
+
+def test_run_mcts_batch_with_zero_simulations_still_expands_every_root():
+    state = new_match(player_count=2, seed=1)
+    turn = Turn.from_state(state)
+
+    roots = run_mcts_batch(
+        [turn, turn], _batch_evaluate, num_simulations=0, rngs=[np.random.default_rng(0), np.random.default_rng(1)]
+    )
+
+    assert len(roots) == 2
+    for root in roots:
+        assert root.visit_count == 0
+        assert root.expanded
+        assert len(root.edges) > 0
+
+
+def test_run_mcts_batch_with_no_root_turns_returns_an_empty_list():
+    assert run_mcts_batch([], _batch_evaluate, num_simulations=10) == []
+
+
+# --- run_mcts_batch: bad path ----------------------------------------------
+
+
+def test_run_mcts_batch_rejects_negative_num_simulations():
+    state = new_match(player_count=2, seed=1)
+    turn = Turn.from_state(state)
+
+    with pytest.raises(ValueError):
+        run_mcts_batch([turn], _batch_evaluate, num_simulations=-1)
+
+
+def test_run_mcts_batch_rejects_mismatched_rngs_length():
+    state = new_match(player_count=2, seed=1)
+    turn = Turn.from_state(state)
+
+    with pytest.raises(ValueError):
+        run_mcts_batch([turn, turn], _batch_evaluate, num_simulations=5, rngs=[np.random.default_rng(0)])
+
+
+# --- _accepts_keyword: detects an evaluator's optional turn(s) fast path -------
+
+
+def test_accepts_keyword_true_for_an_explicit_keyword_only_param():
+    def evaluate(state, *, turn=None):
+        return None
+
+    assert _accepts_keyword(evaluate, "turn") is True
+
+
+def test_accepts_keyword_true_for_a_function_accepting_arbitrary_kwargs():
+    def evaluate(state, **kwargs):
+        return None
+
+    assert _accepts_keyword(evaluate, "turn") is True
+
+
+def test_accepts_keyword_false_for_a_function_without_that_param():
+    def evaluate(state):
+        return None
+
+    assert _accepts_keyword(evaluate, "turn") is False
+
+
+# --- turn-aware evaluators: the legal_actions dedup fast path -------------------
+
+
+def test_run_mcts_passes_each_leafs_own_turn_to_an_evaluator_that_accepts_it():
+    state = new_match(player_count=2, seed=1)
+    seen: list[tuple] = []
+
+    def recording_evaluate(state, *, turn=None):
+        seen.append((state, turn))
+        return _uniform_evaluate(state)
+
+    run_mcts(Turn.from_state(state), recording_evaluate, num_simulations=10, rng=np.random.default_rng(0))
+
+    assert seen  # at least the root was evaluated
+    for seen_state, turn in seen:
+        assert turn is not None
+        assert turn.legal_actions == Turn.from_state(seen_state).legal_actions
+
+
+def test_run_mcts_search_is_identical_whether_or_not_the_evaluator_is_turn_aware():
+    state = new_match(player_count=2, seed=1)
+    turn = Turn.from_state(state)
+
+    def turn_aware_evaluate(state, *, turn=None):
+        return _uniform_evaluate(state)
+
+    blind_root = run_mcts(turn, _uniform_evaluate, num_simulations=20, rng=np.random.default_rng(0))
+    aware_root = run_mcts(turn, turn_aware_evaluate, num_simulations=20, rng=np.random.default_rng(0))
+
+    assert {a: e.visit_count for a, e in blind_root.edges.items()} == {
+        a: e.visit_count for a, e in aware_root.edges.items()
+    }
+
+
+def test_run_mcts_batch_passes_each_leafs_own_turn_to_an_evaluator_that_accepts_it():
+    turn = Turn.from_state(new_match(player_count=2, seed=1))
+    seen: list[tuple] = []
+
+    def recording_evaluate_batch(states, *, turns=None):
+        assert turns is not None
+        seen.extend(zip(states, turns, strict=True))
+        return _batch_evaluate(states)
+
+    run_mcts_batch([turn], recording_evaluate_batch, num_simulations=10, rngs=[np.random.default_rng(0)])
+
+    assert seen
+    for seen_state, seen_turn in seen:
+        assert seen_turn.legal_actions == Turn.from_state(seen_state).legal_actions
+
+
+def test_run_mcts_batch_search_is_identical_whether_or_not_the_evaluator_is_turn_aware():
+    turn = Turn.from_state(new_match(player_count=2, seed=1))
+
+    def turn_aware_batch_evaluate(states, *, turns=None):
+        return _batch_evaluate(states)
+
+    [blind_root] = run_mcts_batch(
+        [turn], _batch_evaluate, num_simulations=20, rngs=[np.random.default_rng(0)]
+    )
+    [aware_root] = run_mcts_batch(
+        [turn], turn_aware_batch_evaluate, num_simulations=20, rngs=[np.random.default_rng(0)]
+    )
+
+    assert {a: e.visit_count for a, e in blind_root.edges.items()} == {
+        a: e.visit_count for a, e in aware_root.edges.items()
+    }
+
+
+# --- run_mcts: reuse_root ----------------------------------------------------
+
+
+def test_reuse_root_continues_accumulating_visits_on_top_of_the_existing_tree():
+    state = new_match(player_count=2, seed=1)
+    while state.phase == "initial_flip":
+        state = apply_action(state, engine_legal_actions(state)[0])
+    turn = Turn.from_state(state)
+
+    first_root = run_mcts(turn, _uniform_evaluate, num_simulations=10, rng=np.random.default_rng(0), add_root_noise=False)
+    assert first_root.visit_count == 10
+
+    reused_root = run_mcts(
+        turn, _uniform_evaluate, num_simulations=5, rng=np.random.default_rng(1), add_root_noise=False,
+        reuse_root=first_root,
+    )
+
+    assert reused_root is first_root
+    assert reused_root.visit_count == 15
+
+
+def test_reuse_root_produces_a_well_formed_tree_matching_a_longer_fresh_search_in_shape():
+    # Not bit-identical to a single 15-simulation run (rng is consumed in a
+    # different order across two calls than one), but reusing a 10-simulation
+    # root and adding 5 more must land on the exact same *total* - nothing
+    # lost, nothing double-counted.
+    state = new_match(player_count=2, seed=1)
+    while state.phase == "initial_flip":
+        state = apply_action(state, engine_legal_actions(state)[0])
+    turn = Turn.from_state(state)
+
+    root = run_mcts(turn, _uniform_evaluate, num_simulations=10, rng=np.random.default_rng(0), add_root_noise=False)
+    root = run_mcts(
+        turn, _uniform_evaluate, num_simulations=5, rng=np.random.default_rng(0), add_root_noise=False,
+        reuse_root=root,
+    )
+
+    assert root.visit_count == 15
+    assert sum(edge.visit_count for edge in root.edges.values()) == 15
+
+
+def test_reuse_root_rejects_a_root_whose_state_does_not_match_the_given_turn():
+    state_a = new_match(player_count=2, seed=1)
+    state_b = new_match(player_count=2, seed=2)
+    turn_a, turn_b = Turn.from_state(state_a), Turn.from_state(state_b)
+    root_a = run_mcts(turn_a, _uniform_evaluate, num_simulations=1, add_root_noise=False)
+
+    with pytest.raises(ValueError):
+        run_mcts(turn_b, _uniform_evaluate, num_simulations=1, reuse_root=root_a)
+
+
+# --- advance_cached_root / infer_revealed_value -------------------------------
+
+
+def _awaiting_draw_state(seed: int) -> GameState:
+    state = new_match(player_count=2, seed=seed)
+    while state.phase == "initial_flip":
+        state = apply_action(state, engine_legal_actions(state)[0])
+    return state
+
+
+def test_advance_cached_root_is_a_no_op_on_a_missing_cache():
+    turn = Turn.from_state(_awaiting_draw_state(seed=1))
+
+    assert mcts.advance_cached_root(None, turn, turn.legal_actions[0], turn) is None
+
+
+def test_advance_cached_root_clears_the_cache_when_turn_before_does_not_match():
+    turn = Turn.from_state(_awaiting_draw_state(seed=1))
+    root = MCTSNode(state=hidden_info.gamestate_from_turn(turn), n_act=2, is_terminal=False)
+    other_turn = Turn.from_state(_awaiting_draw_state(seed=2))
+
+    result = mcts.advance_cached_root(root, other_turn, other_turn.legal_actions[0], other_turn)
+
+    assert result is None
+
+
+def test_advance_cached_root_follows_a_deterministic_edge_to_its_child():
+    # DRAW_DISCARD is never a reveal (the discard top is already public) - a
+    # plain edge.child hop, no ChanceNode involved.
+    state = _awaiting_draw_state(seed=1)
+    turn_before = Turn.from_state(state)
+    action = Action(type=ActionType.DRAW_DISCARD)
+    assert action in turn_before.legal_actions
+    cached_state = hidden_info.gamestate_from_turn(turn_before)
+    expected_child = MCTSNode(state=cached_state, n_act=2, is_terminal=False)
+    root = MCTSNode(state=cached_state, n_act=2, is_terminal=False)
+    root.edges[action] = MCTSEdge(action=action, prior=1.0, n_act=2, child=expected_child)
+    turn_after = Turn.from_state(apply_action(state, action))
+
+    result = mcts.advance_cached_root(root, turn_before, action, turn_after)
+
+    assert result is expected_child
+
+
+def test_advance_cached_root_follows_a_matched_reveal_through_its_chance_node():
+    state = _awaiting_draw_state(seed=1)
+    turn_before = Turn.from_state(state)
+    action = Action(type=ActionType.DRAW_STOCK)
+    turn_after = Turn.from_state(apply_action(state, action))
+    real_value = turn_after.drawn_card
+    assert real_value is not None
+    cached_state = hidden_info.gamestate_from_turn(turn_before)
+    root = MCTSNode(state=cached_state, n_act=2, is_terminal=False)
+    expected_child = MCTSNode(state=cached_state, n_act=2, is_terminal=False)
+    chance = ChanceNode(n_act=2, counts=Counter({real_value: 1}))
+    chance.edges[real_value] = ChanceEdge(value=real_value, prior=1.0, n_act=2, child=expected_child)
+    root.edges[action] = MCTSEdge(action=action, prior=1.0, n_act=2, child=chance)
+
+    result = mcts.advance_cached_root(root, turn_before, action, turn_after)
+
+    assert result is expected_child
+
+
+def test_advance_cached_root_clears_the_cache_when_the_real_reveal_was_never_visited():
+    state = _awaiting_draw_state(seed=1)
+    turn_before = Turn.from_state(state)
+    action = Action(type=ActionType.DRAW_STOCK)
+    turn_after = Turn.from_state(apply_action(state, action))
+    real_value = turn_after.drawn_card
+    other_value = next(v for v in range(-2, 13) if v != real_value)
+    cached_state = hidden_info.gamestate_from_turn(turn_before)
+    root = MCTSNode(state=cached_state, n_act=2, is_terminal=False)
+    chance = ChanceNode(n_act=2, counts=Counter({other_value: 1}))
+    chance.edges[other_value] = ChanceEdge(
+        value=other_value, prior=1.0, n_act=2, child=MCTSNode(state=cached_state, n_act=2, is_terminal=False)
+    )
+    root.edges[action] = MCTSEdge(action=action, prior=1.0, n_act=2, child=chance)
+
+    result = mcts.advance_cached_root(root, turn_before, action, turn_after)
+
+    assert result is None
+
+
+def test_advance_cached_root_clears_the_cache_when_the_edge_was_never_expanded():
+    state = _awaiting_draw_state(seed=1)
+    turn_before = Turn.from_state(state)
+    action = Action(type=ActionType.DRAW_DISCARD)
+    cached_state = hidden_info.gamestate_from_turn(turn_before)
+    root = MCTSNode(state=cached_state, n_act=2, is_terminal=False)
+    root.edges[action] = MCTSEdge(action=action, prior=1.0, n_act=2)  # child left None: never visited
+    turn_after = Turn.from_state(apply_action(state, action))
+
+    result = mcts.advance_cached_root(root, turn_before, action, turn_after)
+
+    assert result is None
+
+
+def test_infer_revealed_value_reads_the_drawn_card_for_a_stock_draw():
+    state = _awaiting_draw_state(seed=1)
+    turn_before = Turn.from_state(state)
+    action = Action(type=ActionType.DRAW_STOCK)
+    turn_after = Turn.from_state(apply_action(state, action))
+
+    assert mcts.infer_revealed_value(turn_before, action, turn_after) == turn_after.drawn_card
+
+
+def test_infer_revealed_value_returns_none_for_a_position_less_action():
+    state = _awaiting_draw_state(seed=1)
+    turn_before = Turn.from_state(state)
+    action = Action(type=ActionType.DRAW_DISCARD)
+    turn_after = Turn.from_state(apply_action(state, action))
+
+    assert mcts.infer_revealed_value(turn_before, action, turn_after) is None
+
+
+# --- greedy_action -----------------------------------------------------------
+
+
+def test_greedy_action_returns_the_single_most_visited_action():
+    action_low = Action(type=ActionType.DRAW_STOCK)
+    action_high = Action(type=ActionType.DRAW_DISCARD)
+    root = MCTSNode(state=new_match(player_count=2, seed=1), n_act=2, is_terminal=False)
+    root.edges[action_low] = MCTSEdge(action=action_low, prior=0.5, n_act=2, visit_count=1)
+    root.edges[action_high] = MCTSEdge(action=action_high, prior=0.5, n_act=2, visit_count=5)
+
+    assert greedy_action(root, np.random.default_rng(0)) == action_high
+
+
+def test_greedy_action_breaks_ties_randomly_among_the_max_visited_actions():
+    action_a = Action(type=ActionType.DRAW_STOCK)
+    action_b = Action(type=ActionType.DRAW_DISCARD)
+    root = MCTSNode(state=new_match(player_count=2, seed=1), n_act=2, is_terminal=False)
+    root.edges[action_a] = MCTSEdge(action=action_a, prior=0.5, n_act=2, visit_count=3)
+    root.edges[action_b] = MCTSEdge(action=action_b, prior=0.5, n_act=2, visit_count=3)
+
+    chosen = {greedy_action(root, np.random.default_rng(seed)) for seed in range(20)}
+
+    assert chosen == {action_a, action_b}
+
+
+def test_greedy_action_raises_on_a_root_with_no_edges():
+    root = MCTSNode(state=new_match(player_count=2, seed=1), n_act=2, is_terminal=False)
+
+    with pytest.raises(ValueError):
+        greedy_action(root, np.random.default_rng(0))

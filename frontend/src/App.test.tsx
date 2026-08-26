@@ -5,18 +5,29 @@ import { loadStoredMatchId, storeMatchId } from './api/matchStorage'
 import type { MatchHistoryOut, MatchStateOut } from './api/types'
 import App from './App'
 
-const { createMatch, applyAction, startNextRound, getMatch, getMatchHistory, gotoMatchHistoryNode } = vi.hoisted(() => ({
-  createMatch: vi.fn(),
-  applyAction: vi.fn(),
-  startNextRound: vi.fn(),
-  getMatch: vi.fn(),
-  getMatchHistory: vi.fn(),
-  gotoMatchHistoryNode: vi.fn(),
-}))
+const { createMatch, applyAction, startNextRound, getMatch, getMatchHistory, gotoMatchHistoryNode, getMctsModels } =
+  vi.hoisted(() => ({
+    createMatch: vi.fn(),
+    applyAction: vi.fn(),
+    startNextRound: vi.fn(),
+    getMatch: vi.fn(),
+    getMatchHistory: vi.fn(),
+    gotoMatchHistoryNode: vi.fn(),
+    getMctsModels: vi.fn(),
+  }))
 
 vi.mock('./api/matchClient', async () => {
   const actual = await vi.importActual<typeof import('./api/matchClient')>('./api/matchClient')
-  return { ...actual, createMatch, applyAction, startNextRound, getMatch, getMatchHistory, gotoMatchHistoryNode }
+  return {
+    ...actual,
+    createMatch,
+    applyAction,
+    startNextRound,
+    getMatch,
+    getMatchHistory,
+    gotoMatchHistoryNode,
+    getMctsModels,
+  }
 })
 
 const INITIAL_FLIP_MATCH: MatchStateOut = {
@@ -64,6 +75,7 @@ const ROOT_ONLY_HISTORY: MatchHistoryOut = {
       current_player: 0,
       phase: 'initial_flip',
       edge: { kind: 'root', action_type: null, position: null },
+      has_mcts_tree: false,
     },
   ],
 }
@@ -75,7 +87,9 @@ beforeEach(() => {
   getMatch.mockReset()
   getMatchHistory.mockReset()
   gotoMatchHistoryNode.mockReset()
+  getMctsModels.mockReset()
   getMatchHistory.mockResolvedValue(ROOT_ONLY_HISTORY)
+  getMctsModels.mockResolvedValue([])
   localStorage.clear()
   // The health check in App's useEffect hits the real `fetch`, not matchClient
   // — stub it so tests don't make a real network call or race on its result.
@@ -100,6 +114,8 @@ describe('App', () => {
       seed: undefined,
       player_names: ['', ''],
       player_types: ['human', 'human'],
+      player_mcts_models: [null, null],
+      player_mcts_num_simulations: [null, null],
     })
   })
 
