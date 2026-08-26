@@ -22,6 +22,7 @@ and deterministic.
 from __future__ import annotations
 
 import copy
+import multiprocessing
 import pickle
 import time
 import traceback
@@ -264,6 +265,15 @@ class _SelfPlayJob:
 _worker_evaluate: EvaluateFn | None = None
 _worker_evaluate_batch: BatchEvaluateFn | None = None
 
+# Every worker process builds its own `AlphaZeroNet` (see `_init_worker`),
+# and PyTorch's internal OpenMP/MKL thread pool - already spun up in this
+# (the parent) process by the time any of this runs - can deadlock a forked
+# child that then touches those same threaded ops. Linux's default
+# `ProcessPoolExecutor` start method is fork; forcing spawn instead (already
+# the only option, and long since proven fine, on Windows/macOS) sidesteps
+# that entirely by starting each worker as a fresh interpreter.
+_MP_SPAWN_CONTEXT = multiprocessing.get_context("spawn")
+
 
 def _init_worker(state_dict: dict[str, torch.Tensor], network_kwargs: dict[str, Any]) -> None:
     global _worker_evaluate, _worker_evaluate_batch
@@ -448,7 +458,10 @@ def run_self_play_iteration_batched(
         group_results = [_play_batch_of_games(job) for job in jobs]
     else:
         with ProcessPoolExecutor(
-            max_workers=config.workers, initializer=_init_worker, initargs=(state_dict, config.network_kwargs)
+            max_workers=config.workers,
+            initializer=_init_worker,
+            initargs=(state_dict, config.network_kwargs),
+            mp_context=_MP_SPAWN_CONTEXT,
         ) as pool:
             group_results = list(pool.map(_play_batch_of_games, jobs))
 
@@ -505,7 +518,10 @@ def run_self_play_iteration(
         episode_results = [_play_one_game(job) for job in jobs]
     else:
         with ProcessPoolExecutor(
-            max_workers=config.workers, initializer=_init_worker, initargs=(state_dict, config.network_kwargs)
+            max_workers=config.workers,
+            initializer=_init_worker,
+            initargs=(state_dict, config.network_kwargs),
+            mp_context=_MP_SPAWN_CONTEXT,
         ) as pool:
             episode_results = list(pool.map(_play_one_game, jobs))
 
@@ -632,7 +648,10 @@ def run_self_play_iteration_vs_bot(
         episode_results = [_play_one_game_vs_bot(job) for job in jobs]
     else:
         with ProcessPoolExecutor(
-            max_workers=config.workers, initializer=_init_worker, initargs=(state_dict, config.network_kwargs)
+            max_workers=config.workers,
+            initializer=_init_worker,
+            initargs=(state_dict, config.network_kwargs),
+            mp_context=_MP_SPAWN_CONTEXT,
         ) as pool:
             episode_results = list(pool.map(_play_one_game_vs_bot, jobs))
 

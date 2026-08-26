@@ -23,6 +23,7 @@ across turns the same way `MctsBot` does live play - both share `rl.mcts
 
 from __future__ import annotations
 
+import multiprocessing
 from collections.abc import MutableMapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -402,6 +403,11 @@ class _EvalBatchJob:
 # `workers > 1` path, mirrors `rl.loop`'s `_worker_evaluate_batch`.
 _eval_worker_evaluate_batch: BatchEvaluateFn | None = None
 
+# See `rl.loop._MP_SPAWN_CONTEXT`'s comment: forking a worker that then
+# builds/uses an `AlphaZeroNet` can deadlock on Linux because of PyTorch's
+# already-initialized OpenMP/MKL thread pool, so force spawn instead.
+_MP_SPAWN_CONTEXT = multiprocessing.get_context("spawn")
+
 
 def _init_eval_worker(state_dict: dict[str, torch.Tensor], network_kwargs: dict[str, Any]) -> None:
     global _eval_worker_evaluate_batch
@@ -519,7 +525,10 @@ def evaluate_vs_heuristic(
                 raise ValueError("evaluate_vs_heuristic: network_kwargs is required when workers > 1")
             state_dict = {k: v.detach().cpu() for k, v in net.state_dict().items()}
             with ProcessPoolExecutor(
-                max_workers=workers, initializer=_init_eval_worker, initargs=(state_dict, network_kwargs)
+                max_workers=workers,
+                initializer=_init_eval_worker,
+                initargs=(state_dict, network_kwargs),
+                mp_context=_MP_SPAWN_CONTEXT,
             ) as pool:
                 group_results = list(pool.map(_play_eval_batch_job, jobs))
 
