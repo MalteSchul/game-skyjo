@@ -10,6 +10,7 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.141.1",
     "numpy>=2.5.2",
+    "python-multipart>=0.0.20",
     "torch>=2.13.0",
     "uvicorn[standard]>=0.52.3",
 ]
@@ -26,6 +27,7 @@ dev = [
     "httpx2",
     "pytest>=9.1.1",
     "ruff>=0.16.3",
+    "tensorboard>=2.21.0",
 ]
 
 [tool.pytest.ini_options]

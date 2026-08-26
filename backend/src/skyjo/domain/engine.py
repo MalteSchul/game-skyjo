@@ -123,8 +123,17 @@ def legal_actions(state: GameState) -> list[Action]:
     return actions
 
 
-def apply_action(state: GameState, action: Action) -> GameState:
-    if action not in legal_actions(state):
+def apply_action(state: GameState, action: Action, *, validate: bool = True) -> GameState:
+    """`validate=False` skips the `action in legal_actions(state)` check -
+    for trusted internal callers only (currently `rl.mcts`'s tree-walk, which
+    only ever applies an action it already pulled from that same state's own
+    `legal_actions`/`Turn.legal_actions`, and recomputing the full list again
+    here just to re-confirm it was a no-op every single call). Every other
+    caller (the API layer, bots, tests) keeps the default - this must never
+    change what a legal/illegal action resolves to, only skip redundant work
+    when the caller already knows the answer.
+    """
+    if validate and action not in legal_actions(state):
         raise IllegalActionError(f"{action} is not legal in phase {state.phase!r}")
 
     if action.type is ActionType.FLIP_INITIAL:
@@ -313,6 +322,36 @@ def _score_and_close_round(state: GameState, finisher: int, awaiting: frozenset[
         phase=phase,
         finisher=finisher,
         players_awaiting_final_turn=awaiting,
+        round_scores=round_scores,
+        total_scores=total_scores,
+    )
+
+
+def force_close_round(state: GameState) -> GameState:
+    """Ends the current round immediately regardless of whether any player has
+    actually completed their board - reveals every remaining face-down card
+    and scores exactly as a natural close does, but with no finisher-doubling
+    penalty (that rule is about a player choosing to end the round; nobody
+    chose to end this one).
+
+    Not a real Skyjo rule - an escape hatch for a caller whose own per-round
+    step budget ran out (see rl.selfplay), so a stuck round produces a valid
+    scored outcome instead of the whole game erroring.
+    """
+    if state.phase in ("round_over", "game_over"):
+        raise IllegalActionError("force_close_round: round is already over")
+
+    boards = tuple(_reveal_all(board) for board in state.boards)
+    round_scores = tuple(sum(c.value for c in board.cards if c is not None) for board in boards)
+    total_scores = tuple(t + s for t, s in zip(state.total_scores, round_scores, strict=True))
+    phase: Phase = "game_over" if any(t >= state.target_score for t in total_scores) else "round_over"
+
+    return replace(
+        state,
+        boards=boards,
+        phase=phase,
+        finisher=None,
+        players_awaiting_final_turn=frozenset(),
         round_scores=round_scores,
         total_scores=total_scores,
     )

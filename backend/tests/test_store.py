@@ -4,13 +4,7 @@ import pytest
 
 from skyjo.api.store import AutoplayStatus, MatchBusyError, MatchStore
 from skyjo.domain.engine import Action, ActionType, apply_action, new_match
-
-# test_an_exception_in_work_still_resets_status_to_idle deliberately raises
-# inside a background thread; pytest's unhandled-thread-exception capture
-# fires once that thread's excepthook actually runs, which can race past the
-# end of that specific test and land on whichever test happens to be running
-# next - so the filter is applied file-wide rather than on that one test.
-pytestmark = pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+from skyjo.domain.observation import Turn
 
 # --- fixture helpers ---------------------------------------------------------
 
@@ -29,6 +23,79 @@ def _compute_flip(position: int):
         return apply_action(state, _flip_action(position))
 
     return compute
+
+
+class _RecordingObserverBot:
+    """Implements `ObservesActions` but never actually acts - these tests
+    only care about whether/when `observe_transition` gets called."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Turn, Action, Turn]] = []
+
+    def choose_action(self, turn, *, report_progress=None):
+        raise NotImplementedError("not exercised by these tests")
+
+    def observe_transition(self, turn_before, action, turn_after) -> None:
+        self.calls.append((turn_before, action, turn_after))
+
+
+# --- observe_transition wiring: every seat's bot hears every real action -----
+
+
+def test_apply_action_notifies_every_seats_observer_bot_not_just_the_actor():
+    store = MatchStore()
+    state = new_match(player_count=2, seed=1)
+    observer_0, observer_1 = _RecordingObserverBot(), _RecordingObserverBot()
+    match_id = store.create(state, ("Ada", "Grace"), ("human", "human"), (observer_0, observer_1))
+
+    store.apply_action(match_id, _flip_action(0), _compute_flip(0))
+
+    assert len(observer_0.calls) == 1
+    assert len(observer_1.calls) == 1
+    assert observer_0.calls[0] == observer_1.calls[0]
+    turn_before, action, turn_after = observer_0.calls[0]
+    assert action == _flip_action(0)
+    assert turn_before.acting_player == 0
+    assert turn_after.boards[0].cards[0] is not None and turn_after.boards[0].cards[0].face_up
+
+
+def test_apply_autoplay_action_also_notifies_observer_bots():
+    store = MatchStore()
+    state = new_match(player_count=2, seed=1)
+    observer = _RecordingObserverBot()
+    match_id = store.create(state, ("Ada", "Grace"), ("human", "human"), (observer, None))
+    store.set_thinking(match_id, player=0)
+
+    store.apply_autoplay_action(match_id, _flip_action(0), _compute_flip(0))
+
+    assert len(observer.calls) == 1
+
+
+def test_start_next_round_does_not_notify_observer_bots():
+    # A next_round edge carries no action - nothing for observe_transition to
+    # report, and a freshly-dealt round is an independent shuffle anyway.
+    store = MatchStore()
+    state = new_match(player_count=2, seed=1)
+    observer = _RecordingObserverBot()
+    match_id = store.create(state, ("Ada", "Grace"), ("human", "human"), (observer, None))
+
+    store.start_next_round(match_id, lambda state: state)
+
+    assert observer.calls == []
+
+
+def test_a_bot_that_does_not_implement_observes_actions_is_left_alone():
+    store = MatchStore()
+    state = new_match(player_count=2, seed=1)
+
+    class _PlainBot:
+        def choose_action(self, turn, *, report_progress=None):
+            raise NotImplementedError
+
+    match_id = store.create(state, ("Ada", "Grace"), ("human", "human"), (_PlainBot(), None))
+
+    # Must not raise just because _PlainBot has no observe_transition.
+    store.apply_action(match_id, _flip_action(0), _compute_flip(0))
 
 
 # --- trigger_autoplay ---------------------------------------------------------
@@ -88,7 +155,7 @@ def test_a_second_trigger_while_one_is_running_reuses_the_same_event():
     assert first_event.wait(timeout=2.0)
 
 
-def test_an_exception_in_work_still_resets_status_to_idle():
+def test_an_exception_in_work_still_resets_status_to_idle(monkeypatch):
     store = MatchStore()
     match_id = _new_match_id(store)
 
@@ -97,7 +164,12 @@ def test_an_exception_in_work_still_resets_status_to_idle():
         raise RuntimeError("boom")
 
     # The exception is expected to escape the background thread - there's
-    # nothing there to catch it. See the module-level filterwarnings above.
+    # nothing there to catch it. Silence the default threading.excepthook for
+    # it deterministically (rather than a pytest warnings filter, whose
+    # capture fires whenever the thread's excepthook happens to run - which
+    # can race past the end of this test and land on whichever test is
+    # running next).
+    monkeypatch.setattr(threading, "excepthook", lambda args: None)
     event = store.trigger_autoplay(match_id, work)
 
     assert event.wait(timeout=2.0)
@@ -163,3 +235,55 @@ def test_apply_action_is_allowed_again_once_a_pending_autoplay_finishes():
     node, _, _ = store.apply_action(match_id, _flip_action(0), _compute_flip(0))
 
     assert node.state.boards[0].cards[0].face_up is True
+
+
+# --- per-node mcts_tree storage ------------------------------------------------
+
+
+def test_apply_autoplay_action_attaches_the_given_tree_to_the_new_node():
+    store = MatchStore()
+    match_id = _new_match_id(store)
+    tree = {"kind": "decision", "edges": []}
+
+    node, _, _ = store.apply_autoplay_action(match_id, _flip_action(0), _compute_flip(0), mcts_tree=tree)
+
+    assert node.mcts_tree == tree
+    assert store.get_node(match_id, node.node_id).mcts_tree == tree
+
+
+def test_apply_action_leaves_mcts_tree_as_none():
+    store = MatchStore()
+    match_id = _new_match_id(store)
+
+    node, _, _ = store.apply_action(match_id, _flip_action(0), _compute_flip(0))
+
+    assert node.mcts_tree is None
+
+
+def test_replaying_an_existing_edge_keeps_its_original_tree_rather_than_the_new_one():
+    store = MatchStore()
+    match_id = _new_match_id(store)
+    root_id = store.get_head(match_id)[0].node_id
+    original_tree = {"kind": "decision", "edges": ["original"]}
+    node, _, _ = store.apply_autoplay_action(match_id, _flip_action(0), _compute_flip(0), mcts_tree=original_tree)
+    store.goto(match_id, root_id)
+
+    replayed, _, _ = store.apply_autoplay_action(
+        match_id, _flip_action(0), _compute_flip(0), mcts_tree={"kind": "decision", "edges": ["different"]}
+    )
+
+    assert replayed.node_id == node.node_id
+    assert replayed.mcts_tree == original_tree
+
+
+def test_get_node_does_not_move_the_head():
+    store = MatchStore()
+    match_id = _new_match_id(store)
+    root_id = store.get_head(match_id)[0].node_id
+    store.apply_action(match_id, _flip_action(0), _compute_flip(0))
+    head_before = store.get_head(match_id)[0].node_id
+
+    fetched = store.get_node(match_id, root_id)
+
+    assert fetched.node_id == root_id
+    assert store.get_head(match_id)[0].node_id == head_before

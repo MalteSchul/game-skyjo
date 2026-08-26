@@ -246,6 +246,11 @@ p {
   letter-spacing: 0.05em;
 }
 
+.field-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .field input {
   font: inherit;
   font-size: 15px;
@@ -365,6 +370,22 @@ p {
 }
 
 .player-seat-row .player-type-field select {
+  width: 100%;
+}
+
+.player-seat-row .player-mcts-model-field {
+  flex: 0 0 150px;
+}
+
+.player-seat-row .player-mcts-model-field select {
+  width: 100%;
+}
+
+.player-seat-row .player-mcts-simulations-field {
+  flex: 0 0 130px;
+}
+
+.player-seat-row .player-mcts-simulations-field input {
   width: 100%;
 }
 
@@ -513,6 +534,23 @@ p {
   border-color: var(--accent-border);
   color: var(--text-h);
   font-weight: 600;
+}
+
+.history-tree-link {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  font-size: 14px;
+  text-decoration: none;
+  border-radius: 8px;
+  opacity: 0.6;
+  transition: opacity 150ms ease, background 150ms ease;
+}
+.history-tree-link:hover {
+  opacity: 1;
+  background: var(--code-bg);
 }
 
 .history-window-hint {

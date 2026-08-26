@@ -5,7 +5,7 @@ export type Phase = 'initial_flip' | 'awaiting_draw' | 'awaiting_placement' | 'r
 
 export type ActionTypeName = 'flip_initial' | 'draw_stock' | 'draw_discard' | 'place' | 'discard_and_reveal'
 
-export type PlayerTypeName = 'human' | 'random_bot' | 'thinking_bot'
+export type PlayerTypeName = 'human' | 'random_bot' | 'thinking_bot' | 'heuristic_bot' | 'mcts_bot'
 
 export type MatchStatus = 'idle' | 'thinking'
 
@@ -49,6 +49,8 @@ export interface NewMatchRequest {
   seed?: number
   player_names?: string[]
   player_types?: PlayerTypeName[]
+  player_mcts_models?: (string | null)[]
+  player_mcts_num_simulations?: (number | null)[]
 }
 
 export interface ActionRequest {
@@ -73,6 +75,7 @@ export interface HistoryNodeOut {
   current_player: number
   phase: Phase
   edge: HistoryEdgeOut
+  has_mcts_tree: boolean
 }
 
 export interface MatchHistoryOut {

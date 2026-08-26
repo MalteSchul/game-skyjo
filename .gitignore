@@ -12,6 +12,11 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+backend/scripts/output/*
+!backend/scripts/output/.gitkeep
+backend/scripts/train_local.*
+backend/models/*
+!backend/models/.gitkeep
 
 # Env files
 .env

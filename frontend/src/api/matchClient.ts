@@ -15,10 +15,13 @@ export class ApiError extends Error {
 
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response
+  // A FormData body (see uploadMctsModel) must not get an explicit
+  // Content-Type - the browser needs to set its own multipart boundary.
+  const isFormData = init?.body instanceof FormData
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
       ...init,
-      headers: { 'Content-Type': 'application/json', ...init?.headers },
+      headers: isFormData ? init?.headers : { 'Content-Type': 'application/json', ...init?.headers },
     })
   } catch {
     throw new ApiError(0, 'Could not reach the server. Check your connection and try again.')
@@ -37,6 +40,18 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function createMatch(newMatch: NewMatchRequest): Promise<MatchStateOut> {
   return apiRequest<MatchStateOut>('/matches', { method: 'POST', body: JSON.stringify(newMatch) })
+}
+
+export function getMctsModels(): Promise<string[]> {
+  return apiRequest<string[]>('/matches/mcts-models')
+}
+
+/** Uploads a checkpoint file, returning the model name it's now selectable
+ * under (see GET /matches/mcts-models). */
+export function uploadMctsModel(file: File): Promise<string> {
+  const formData = new FormData()
+  formData.append('file', file)
+  return apiRequest<string>('/matches/mcts-models', { method: 'POST', body: formData })
 }
 
 export function getMatch(matchId: string): Promise<MatchStateOut> {
@@ -60,4 +75,11 @@ export function getMatchHistory(matchId: string): Promise<MatchHistoryOut> {
 
 export function gotoMatchHistoryNode(matchId: string, nodeId: string): Promise<MatchStateOut> {
   return apiRequest<MatchStateOut>(`/matches/${matchId}/history/${nodeId}/goto`, { method: 'POST' })
+}
+
+// Untyped: this is the same schema-less `tree_export.tree_to_dict` shape
+// `tools/mcts-tree` already parses defensively (see treeParse.ts) rather than
+// trusts — no reason to duplicate that structural typing here too.
+export function getMctsTree(matchId: string, nodeId: string): Promise<unknown> {
+  return apiRequest<unknown>(`/matches/${matchId}/history/${nodeId}/mcts-tree`)
 }

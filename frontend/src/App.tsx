@@ -125,6 +125,8 @@ function App() {
     seed: number | undefined,
     playerNames: string[],
     playerTypes: PlayerTypeName[],
+    playerMctsModels: (string | null)[],
+    playerMctsNumSimulations: (number | null)[],
   ) {
     setBusy(true)
     setError(null)
@@ -134,6 +136,8 @@ function App() {
         seed,
         player_names: playerNames,
         player_types: playerTypes,
+        player_mcts_models: playerMctsModels,
+        player_mcts_num_simulations: playerMctsNumSimulations,
       })
       setMatch(created)
       storeMatchId(created.match_id)
@@ -222,7 +226,13 @@ function App() {
         ) : (
           <div className="app-body">
             {match && (
-              <HistoryPanel history={history} playerNames={match.player_names} onGoto={handleGotoHistory} busy={busy} />
+              <HistoryPanel
+                history={history}
+                matchId={match.match_id}
+                playerNames={match.player_names}
+                onGoto={handleGotoHistory}
+                busy={busy}
+              />
             )}
             <MatchView
               match={match}

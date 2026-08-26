@@ -77,6 +77,13 @@ class AlphaZeroNet(nn.Module):
         self.blocks = nn.ModuleList([ResidualBlock(trunk_dim) for _ in range(num_residual_blocks)])
         self.policy_head = nn.Linear(trunk_dim, ACTION_SPACE_SIZE)
         self.rank_head = nn.Linear(trunk_dim, N_MAX_PLAYERS * N_MAX_PLAYERS)
+        # Auxiliary regression head: predicts each player's final normalized
+        # total score (see rl.train's points_target), not just their rank -
+        # gives the network a magnitude signal ("won by a little" vs "won by
+        # a lot") that the ordinal rank_head can't express. Auxiliary only:
+        # MCTS still backs up `utility` (derived from rank_probs), this head
+        # never feeds search.
+        self.points_head = nn.Linear(trunk_dim, N_MAX_PLAYERS)
 
     def trunk(self, x: torch.Tensor) -> torch.Tensor:
         h = torch.relu(self.input_norm(self.input_proj(x)))
@@ -89,12 +96,18 @@ class AlphaZeroNet(nn.Module):
         features: torch.Tensor,
         legal_action_mask: torch.Tensor,
         active_count: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Returns (policy_probs (B, |A|), rank_probs (B, 8, 8), utility (B, 8)).
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Returns (policy_probs (B, |A|), rank_probs (B, 8, 8), utility (B, 8),
+        points_pred (B, 8)).
 
-        `rank_probs[b, i, r]` is P(player i finishes at rank r | state b), zero
-        for any i or r >= active_count[b]. `utility[b, i]` is likewise zero
-        for i >= active_count[b].
+        `rank_probs[b, i, r]` is P(the player at canonical slot i finishes at
+        rank r | state b) - `i` indexes canonical (rotated) player order, not
+        absolute seat id; see `encoding.rotation_perm`. Zero for any i or
+        r >= active_count[b]. `utility[b, i]` and `points_pred[b, i]` are
+        likewise canonical-slot-indexed and zero for i >= active_count[b].
+        `points_pred` is each player's predicted final normalized total score
+        (see `rl.train.TrainingBatch.points_target`) - an auxiliary signal,
+        not consumed by MCTS (which backs up `utility`).
         """
         h = self.trunk(features)
 
@@ -110,4 +123,6 @@ class AlphaZeroNet(nn.Module):
         w = rank_utility_weights(active_count, features.device)  # (B, N_MAX)
         utility = torch.einsum("bir,br->bi", rank_probs, w)
 
-        return policy_probs, rank_probs, utility
+        points_pred = self.points_head(h) * row_active.float()
+
+        return policy_probs, rank_probs, utility, points_pred

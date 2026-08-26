@@ -26,6 +26,8 @@ interface MatchViewProps {
     seed: number | undefined,
     playerNames: string[],
     playerTypes: PlayerTypeName[],
+    playerMctsModels: (string | null)[],
+    playerMctsNumSimulations: (number | null)[],
   ) => void
   onDrawStock: () => void
   onDrawDiscard: () => void

@@ -3,6 +3,8 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
+from skyjo.domain.action_equivalence import distinct_actions
+from skyjo.domain.deck import CARD_COUNTS
 from skyjo.domain.engine import (
     MAX_PLAYERS,
     MIN_PLAYERS,
@@ -12,23 +14,64 @@ from skyjo.domain.engine import (
     legal_actions,
     new_match,
 )
+from skyjo.domain.observation import Turn
 from skyjo.rl.action_space import ACTION_SPACE_SIZE
 from skyjo.rl.encoding import (
     _ABSENT_VALUE,
     _BOARD_FEATURES,
+    _N_DECK_VALUES,
     GLOBAL_FEATURES,
     INPUT_DIM,
     N_MAX_PLAYERS,
     _normalize_value,
     encode_state,
+    rotation_perm,
 )
 
 _BOARD_BLOCK_SIZE = N_MAX_PLAYERS * _BOARD_FEATURES
+_DECK_HISTOGRAM = _BOARD_BLOCK_SIZE + GLOBAL_FEATURES - _N_DECK_VALUES
 # Offsets into the global-feature block, matching encode_state's build order.
 _DISCARD_TOP_PRESENT = _BOARD_BLOCK_SIZE + 0
 _DISCARD_TOP_VALUE = _BOARD_BLOCK_SIZE + 1
 _DRAWN_PRESENT = _BOARD_BLOCK_SIZE + 9
 _DRAWN_VALUE = _BOARD_BLOCK_SIZE + 10
+_FINISHER_PRESENT = _DRAWN_VALUE + 1
+_FINISHER_ONEHOT = _FINISHER_PRESENT + 1
+_AWAITING_MULTIHOT = _FINISHER_ONEHOT + N_MAX_PLAYERS
+_TOTAL_SCORES = _AWAITING_MULTIHOT + N_MAX_PLAYERS
+
+# --- rotation_perm: canonical (current-player-at-slot-0) permutation ---------
+
+
+@pytest.mark.parametrize("n_act", range(MIN_PLAYERS, MAX_PLAYERS + 1))
+def test_rotation_perm_puts_current_player_at_slot_zero(n_act):
+    for current_player in range(n_act):
+        perm = rotation_perm(current_player, n_act)
+        assert perm[0] == current_player
+
+
+@pytest.mark.parametrize("n_act", range(MIN_PLAYERS, MAX_PLAYERS + 1))
+def test_rotation_perm_is_a_bijection_on_real_players(n_act):
+    for current_player in range(n_act):
+        perm = rotation_perm(current_player, n_act)
+        assert sorted(perm[:n_act].tolist()) == list(range(n_act))
+
+
+@pytest.mark.parametrize("n_act", range(MIN_PLAYERS, MAX_PLAYERS + 1))
+def test_rotation_perm_round_trips_through_rotate_then_scatter(n_act):
+    for current_player in range(n_act):
+        perm = rotation_perm(current_player, n_act)
+        original = np.arange(n_act) * 10  # distinct values so misplacement is obvious
+        rotated = original[perm[:n_act]]
+        recovered = np.empty_like(rotated)
+        recovered[perm[:n_act]] = rotated
+        np.testing.assert_array_equal(recovered, original)
+
+
+def test_rotation_perm_leaves_padding_slots_as_identity():
+    perm = rotation_perm(current_player=1, n_act=3)
+    np.testing.assert_array_equal(perm[3:], np.arange(3, N_MAX_PLAYERS))
+
 
 # --- shape / dtype stability across every legal player count -----------------
 
@@ -44,7 +87,7 @@ def test_encode_state_produces_a_fixed_size_finite_feature_vector(player_count):
     assert np.isfinite(encoding.features).all()
     assert encoding.legal_action_mask.shape == (ACTION_SPACE_SIZE,)
     assert encoding.active_count == player_count
-    assert encoding.active_player == state.current_player
+    assert encoding.perm[0] == state.current_player
 
 
 def test_input_dim_does_not_depend_on_player_count():
@@ -69,12 +112,94 @@ def test_board_features_for_players_beyond_active_count_are_zero_padded():
     assert np.any(board_block[0] != 0.0)  # sanity: real players actually produce features
 
 
-def test_legal_action_mask_matches_between_encoding_and_action_space_module():
+# --- canonical ordering: encode_state output rotates with current_player -----
+
+
+def test_board_and_total_scores_blocks_rotate_with_current_player():
+    # Same underlying boards/scores, only current_player differs - board_block
+    # and total_scores_norm must shift by exactly the resulting permutation,
+    # since that's the whole point of canonical (rotated) encoding. Player 0
+    # as current_player is the identity permutation, so its encoding gives us
+    # each absolute player's board/score features as an unrotated baseline.
+    state = new_match(player_count=4, seed=7)
+    state = replace(state, total_scores=(3, 5, 7, 11), current_player=0)
+
+    baseline = encode_state(state)
+    baseline_board_block = baseline.features[:_BOARD_BLOCK_SIZE].reshape(N_MAX_PLAYERS, _BOARD_FEATURES)
+    baseline_total_scores = baseline.features[_TOTAL_SCORES : _TOTAL_SCORES + N_MAX_PLAYERS]
+
+    for current_player in range(1, 4):
+        rotated_state = replace(state, current_player=current_player)
+        encoding = encode_state(rotated_state)
+        perm = encoding.perm
+
+        board_block = encoding.features[:_BOARD_BLOCK_SIZE].reshape(N_MAX_PLAYERS, _BOARD_FEATURES)
+        for canonical_slot in range(4):
+            np.testing.assert_array_equal(board_block[canonical_slot], baseline_board_block[perm[canonical_slot]])
+
+        total_scores_norm = encoding.features[_TOTAL_SCORES : _TOTAL_SCORES + N_MAX_PLAYERS]
+        for canonical_slot in range(4):
+            assert total_scores_norm[canonical_slot] == pytest.approx(baseline_total_scores[perm[canonical_slot]])
+
+
+def test_finisher_onehot_rotates_with_current_player():
+    state = new_match(player_count=4, seed=7)
+    state = replace(state, finisher=2)
+
+    for current_player in range(4):
+        rotated_state = replace(state, current_player=current_player)
+        encoding = encode_state(rotated_state)
+
+        expected_slot = (state.finisher - current_player) % 4
+        finisher_onehot = encoding.features[_FINISHER_ONEHOT : _FINISHER_ONEHOT + N_MAX_PLAYERS]
+        assert finisher_onehot[expected_slot] == 1.0
+        assert finisher_onehot.sum() == 1.0
+
+
+def test_encode_state_defaults_to_the_collapsed_representative_set_not_every_raw_legal_action():
+    # Fresh initial_flip: every FLIP_INITIAL position is provably equivalent
+    # (nothing revealed anywhere yet) - domain.action_equivalence collapses
+    # all of them onto one representative, and that's what the network's
+    # policy head should see, not all of the raw per-position actions.
+    state = new_match(player_count=4, seed=3)
+    turn = Turn.from_state(state)
+    assert len(turn.legal_actions) > 1  # sanity: there's real collapsing to observe
+
+    mask = encode_state(state).legal_action_mask
+
+    assert int(mask.sum()) == len(distinct_actions(turn))
+    assert int(mask.sum()) < len(turn.legal_actions)
+
+
+def test_encode_state_mask_matches_the_raw_legal_action_mask_when_nothing_can_collapse():
+    # awaiting_draw: DRAW_STOCK vs DRAW_DISCARD are never equivalent to each
+    # other, so collapsing is a no-op here - the two masks should agree exactly.
     from skyjo.rl.action_space import legal_action_mask
 
-    state = new_match(player_count=4, seed=3)
+    state = new_match(player_count=2, seed=1)
+    while state.phase == "initial_flip":
+        state = apply_action(state, legal_actions(state)[0])
 
     assert np.array_equal(encode_state(state).legal_action_mask, legal_action_mask(state))
+
+
+def test_encode_state_with_precomputed_legal_actions_matches_recomputing_them():
+    state = new_match(player_count=3, seed=1)
+    turn = Turn.from_state(state)
+
+    recomputed = encode_state(state)
+    precomputed = encode_state(state, legal_actions=distinct_actions(turn))
+
+    np.testing.assert_array_equal(precomputed.features, recomputed.features)
+    np.testing.assert_array_equal(precomputed.legal_action_mask, recomputed.legal_action_mask)
+
+
+def test_encode_state_actually_uses_the_precomputed_legal_actions_not_just_ignoring_them():
+    state = new_match(player_count=3, seed=1)
+
+    encoding = encode_state(state, legal_actions=[])
+
+    assert not encoding.legal_action_mask.any()  # would be non-empty if the override were ignored
 
 
 # --- bad path ------------------------------------------------------------------
@@ -146,6 +271,43 @@ def test_board_card_value_feature_is_the_sentinel_while_face_down():
     value_features = board_block[0].reshape(-1, 3)[:, 2]
 
     assert np.all(value_features == _ABSENT_VALUE)
+
+
+# --- remaining-deck composition (card counting) -------------------------------
+
+
+def test_remaining_deck_histogram_only_docks_the_single_visible_discard_card():
+    # A fresh match has exactly one known card (the starting discard) and
+    # nothing else revealed yet - every other value should read as fully
+    # unseen (1.0), and the discarded value's own value should read as
+    # "one copy accounted for".
+    state = new_match(player_count=2, seed=1)
+    discard_value = state.discard[-1]
+
+    histogram = encode_state(state).features[_DECK_HISTOGRAM : _DECK_HISTOGRAM + _N_DECK_VALUES]
+
+    for (value, total), fraction in zip(CARD_COUNTS, histogram, strict=True):
+        expected = (total - 1) / total if value == discard_value else 1.0
+        assert fraction == pytest.approx(expected)
+
+
+def test_remaining_deck_histogram_ignores_face_down_cards():
+    # Flipping a card face-up must move its value's fraction; a card that
+    # stays face-down must never affect the histogram, even though its true
+    # value exists in `GameState` - it's genuinely unknown to every player.
+    state = new_match(player_count=2, seed=1)
+    before = encode_state(state).features[_DECK_HISTOGRAM : _DECK_HISTOGRAM + _N_DECK_VALUES].copy()
+
+    state = apply_action(state, Action(ActionType.FLIP_INITIAL, position=0))
+    flipped_value = state.boards[0].cards[0].value
+    after = encode_state(state).features[_DECK_HISTOGRAM : _DECK_HISTOGRAM + _N_DECK_VALUES]
+
+    value_index = [v for v, _ in CARD_COUNTS].index(flipped_value)
+    for i in range(_N_DECK_VALUES):
+        if i == value_index:
+            assert after[i] < before[i]
+        else:
+            assert after[i] == pytest.approx(before[i])
 
 
 def test_board_card_value_feature_is_distinguishable_from_the_lowest_real_card_once_flipped():
