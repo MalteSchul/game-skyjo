@@ -12,12 +12,15 @@ from skyjo.rl.selfplay import ReplaySample
 from skyjo.rl.train import collate_batch, compute_loss, training_step
 
 
-def _sample(seed: int, n_act: int, y: list[int], *, current_player: int = 0) -> ReplaySample:
+def _sample(
+    seed: int, n_act: int, y: list[int], *, current_player: int = 0, points: list[float] | None = None
+) -> ReplaySample:
     state = new_match(player_count=n_act, seed=seed)
     state = replace(state, current_player=current_player)
     pi = np.zeros(ACTION_SPACE_SIZE, dtype=np.float32)
     pi[: n_act + 1] = 1.0 / (n_act + 1)  # arbitrary valid distribution
-    return ReplaySample(state=state, n_act=n_act, pi=pi, y=np.array(y, dtype=np.int64))
+    points_y = np.array(points if points is not None else [0.0] * n_act, dtype=np.float32)
+    return ReplaySample(state=state, n_act=n_act, pi=pi, y=np.array(y, dtype=np.int64), points_y=points_y)
 
 
 def _tiny_net() -> AlphaZeroNet:
@@ -39,6 +42,8 @@ def test_collate_batch_produces_correctly_shaped_tensors():
     assert batch.pi_target.shape == (2, ACTION_SPACE_SIZE)
     assert batch.y.shape == (2, 8)
     assert batch.y[0, 2:].tolist() == [0, 0, 0, 0, 0, 0]  # padding beyond n_act=2
+    assert batch.points_target.shape == (2, 8)
+    assert batch.points_target[0, 2:].tolist() == [0.0] * 6  # padding beyond n_act=2
 
 
 def test_collate_batch_with_precomputed_encodings_matches_recomputing_them():
@@ -60,7 +65,7 @@ def test_compute_loss_returns_finite_positive_losses_with_expected_keys():
 
     assert torch.isfinite(total_loss)
     assert total_loss.item() > 0
-    assert set(metrics) == {"policy_loss", "rank_loss", "l2_term", "total_loss"}
+    assert set(metrics) == {"policy_loss", "rank_loss", "points_loss", "l2_term", "total_loss"}
     assert all(np.isfinite(v) for v in metrics.values())
 
 
@@ -88,6 +93,18 @@ def test_rank_loss_ignores_padding_beyond_n_act():
     assert real_metrics["rank_loss"] == pytest.approx(corrupted_metrics["rank_loss"])
 
 
+def test_points_loss_ignores_padding_beyond_n_act():
+    net = _tiny_net()
+    real = collate_batch([_sample(1, 2, [0, 1])])
+    corrupted = collate_batch([_sample(1, 2, [0, 1])])
+    corrupted.points_target[0, 2:] = 99.0  # garbage in the padded, inactive region
+
+    _, real_metrics = compute_loss(net, real)
+    _, corrupted_metrics = compute_loss(net, corrupted)
+
+    assert real_metrics["points_loss"] == pytest.approx(corrupted_metrics["points_loss"])
+
+
 # --- y is rotated into each sample's own canonical slot order --------------
 
 
@@ -104,6 +121,18 @@ def test_collate_batch_rotates_y_through_the_samples_own_permutation():
     # canonical slot s holds absolute player perm[s], so y[s] must be
     # sample.y[perm[s]].
     assert batch.y[0].tolist()[:4] == [20, 30, 40, 10]
+
+
+def test_collate_batch_rotates_points_target_through_the_samples_own_permutation():
+    # Same property as y above, for points_target.
+    sample = _sample(1, 4, [0, 1, 2, 3], current_player=1, points=[0.1, 0.2, 0.3, 0.4])
+    encoding = encode_state(sample.state)
+    assert encoding.perm[:4].tolist() == [1, 2, 3, 0]  # sanity: a genuine rotation, not identity
+
+    batch = collate_batch([sample], encodings=[encoding])
+
+    points = batch.points_target[0].tolist()[:4]
+    assert points == pytest.approx([0.2, 0.3, 0.4, 0.1])
 
 
 def test_collate_batch_rotates_y_independently_per_row_in_a_mixed_batch():

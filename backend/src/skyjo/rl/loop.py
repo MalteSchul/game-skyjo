@@ -3,11 +3,12 @@ checkpoint -> repeat. `scripts/train_mcts.py` is a thin CLI front-end over
 `run_training_loop`; the loop itself lives here so it's directly unit-testable
 with tiny configs (no subprocess/CLI needed).
 
-No arena/gating yet: every iteration's freshly-trained network becomes the
-next iteration's self-play network unconditionally, rather than the more
-traditional "only promote if it beats the previous best in an arena match"
-gate. Good enough to bootstrap a first checkpoint; add gating later if
-training turns out to regress rather than monotonically improve.
+Gating (`TrainingConfig.gate_on_eval`) is optional and off by default: every
+iteration's freshly-trained network becomes the next iteration's self-play
+network unconditionally, the same as before gating existed. When turned on,
+each `eval_every` boundary's `evaluate_vs_heuristic` result decides whether
+that iteration's weight update is kept - see `gate_on_eval`'s docstring.
+Existing callers (and every test not explicitly opting in) are unaffected.
 
 Self-play parallelism (`config.workers > 1`) uses a fresh `ProcessPoolExecutor`
 per iteration rather than one long-lived pool: the network changes every
@@ -20,6 +21,7 @@ and deterministic.
 
 from __future__ import annotations
 
+import copy
 import pickle
 import time
 import traceback
@@ -60,7 +62,13 @@ from skyjo.rl.selfplay import (
     generate_episode_vs_bot,
     generate_episodes_batch,
 )
-from skyjo.rl.train import DEFAULT_L2_COEF, DEFAULT_LAMBDA_RANK, collate_batch, training_step
+from skyjo.rl.train import (
+    DEFAULT_L2_COEF,
+    DEFAULT_LAMBDA_POINTS,
+    DEFAULT_LAMBDA_RANK,
+    collate_batch,
+    training_step,
+)
 
 
 @dataclass(frozen=True)
@@ -88,14 +96,16 @@ class TrainingConfig:
     min_buffer_size: int | None = None  # None = require at least one full batch (batch_size)
     lr: float = 1e-3
     lambda_rank: float = DEFAULT_LAMBDA_RANK
+    lambda_points: float = DEFAULT_LAMBDA_POINTS
     l2_coef: float = DEFAULT_L2_COEF
     network_kwargs: dict[str, Any] = field(default_factory=dict)
     max_steps_per_episode: int = DEFAULT_MAX_STEPS
     # Safety valves against a stuck round/game - see selfplay.py's
     # DEFAULT_ROUND_MAX_STEPS/DEFAULT_MAX_ROUNDS docstrings for why a round
-    # can legitimately never end on its own. max_steps_per_episode above is
-    # now expected to be near-unreachable rather than the routine failure
-    # path it used to be - keep it comfortably above round_max_steps *
+    # can legitimately never end on its own. Disabled (effectively infinite)
+    # by default: max_steps_per_episode above is the only bound on a game's
+    # length unless these are overridden with finite values, in which case
+    # keep max_steps_per_episode comfortably above round_max_steps *
     # max_rounds (worst case) or every game fails before these valves get a
     # chance to work (see benchmark_selfplay_batching.py's --max-steps help
     # for a concrete example of this exact trap).
@@ -136,6 +146,43 @@ class TrainingConfig:
     eval_every: int | None = None
     eval_games: int = 20
     eval_num_simulations: int = 20
+    # 0 (default) = serial, in-process eval - evaluate_vs_heuristic's own
+    # default. >0 spreads eval_games across a ProcessPoolExecutor of this
+    # many workers, the same idea as self-play's `workers` above but as a
+    # separate knob: eval's per-game cost profile (eval_num_simulations,
+    # typically far below self-play's num_simulations) doesn't have to match
+    # self-play's worker count for the same tradeoffs to make sense.
+    eval_workers: int = 0
+    # 1 (default) = one game's leaf evaluated per network call, matching
+    # evaluate_vs_heuristic's own default. >1 batches that many games'
+    # concurrent leaf evaluations into one network call - see
+    # `rl.mcts.run_mcts_batch`, same batching idea as self-play's
+    # `selfplay_batch_size` above.
+    eval_batch_size: int = 1
+    # False (default): unchanged behavior, every iteration's trained weights
+    # carry forward regardless of eval outcome. True: at every eval_every
+    # boundary, keep this iteration's weight update only if
+    # eval_result.win_rate >= (best win rate seen so far) - gate_tolerance;
+    # otherwise roll `net`/`optimizer` back in-memory to the last accepted
+    # snapshot before self-play continues into the next iteration - so a
+    # rejected update can't compound into further training the way every
+    # observed regression in practice did (see module docstring). The
+    # checkpoint/buffer saved this iteration (if checkpoint_dir is set)
+    # reflects whichever state won that decision, not the pre-gating trained
+    # weights. Requires eval_every to be set - nothing to gate on otherwise.
+    gate_on_eval: bool = False
+    # Slack allowed below the best win rate before an update counts as a
+    # regression - 0.0 (default) requires an update to match or beat the
+    # best seen so far exactly; a small positive value (e.g. 0.02) tolerates
+    # eval's own sampling noise (eval_games games is a small sample) without
+    # rejecting a genuinely-fine update.
+    gate_tolerance: float = 0.0
+    # The floor the very first eval is compared against - e.g. a bootstrap
+    # checkpoint's own separately-measured win rate, so gating protects that
+    # known baseline from iteration 1 onward instead of accepting whatever
+    # the first iteration happens to produce as the new bar. 0.0 (default)
+    # accepts the first eval unconditionally, same as having no prior floor.
+    gate_initial_best_win_rate: float = 0.0
 
     def __post_init__(self) -> None:
         if self.iterations <= 0:
@@ -173,6 +220,10 @@ class TrainingConfig:
             raise ValueError("TrainingConfig: eval_games must be > 0")
         if self.eval_num_simulations < 0:
             raise ValueError("TrainingConfig: eval_num_simulations must be >= 0")
+        if self.eval_workers < 0:
+            raise ValueError("TrainingConfig: eval_workers must be >= 0")
+        if self.eval_batch_size < 1:
+            raise ValueError("TrainingConfig: eval_batch_size must be >= 1")
         if self.selfplay_opponent not in ("self", "heuristic", "random"):
             raise ValueError(
                 f"TrainingConfig: selfplay_opponent must be 'self', 'heuristic', or 'random', got {self.selfplay_opponent!r}"
@@ -181,6 +232,10 @@ class TrainingConfig:
             raise ValueError(
                 f"TrainingConfig: selfplay_opponent={self.selfplay_opponent!r} requires min_players == max_players == 2"
             )
+        if self.gate_on_eval and self.eval_every is None:
+            raise ValueError("TrainingConfig: gate_on_eval requires eval_every to be set")
+        if self.gate_tolerance < 0:
+            raise ValueError("TrainingConfig: gate_tolerance must be >= 0")
 
 
 @dataclass
@@ -621,6 +676,13 @@ def run_training_loop(
     min_buffer_size = config.min_buffer_size if config.min_buffer_size is not None else config.batch_size
     failure_log_path = str(metrics.log_dir / "self_play_failures.log")
 
+    best_win_rate = config.gate_initial_best_win_rate
+    best_state_dict: dict[str, torch.Tensor] | None = None
+    best_optimizer_state_dict: dict[str, Any] | None = None
+    if config.gate_on_eval:
+        best_state_dict = copy.deepcopy(net.state_dict())
+        best_optimizer_state_dict = copy.deepcopy(optimizer.state_dict())
+
     for _ in range(state.iteration, config.iterations):
         step = state.iteration
 
@@ -660,7 +722,14 @@ def run_training_loop(
                 batch_samples, batch_encodings = buffer.sample_batch_with_encodings(config.batch_size, rng)
                 batch = collate_batch(batch_samples, encodings=batch_encodings)
                 step_metrics.append(
-                    training_step(net, optimizer, batch, lambda_rank=config.lambda_rank, l2_coef=config.l2_coef)
+                    training_step(
+                        net,
+                        optimizer,
+                        batch,
+                        lambda_rank=config.lambda_rank,
+                        lambda_points=config.lambda_points,
+                        l2_coef=config.l2_coef,
+                    )
                 )
                 state.total_train_steps += 1
 
@@ -684,16 +753,35 @@ def run_training_loop(
                 round_max_steps=config.round_max_steps,
                 max_rounds=config.max_rounds,
                 seed=config.seed,
+                workers=config.eval_workers,
+                eval_batch_size=config.eval_batch_size,
+                network_kwargs=config.network_kwargs,
             )
-            metrics.log(
-                step,
-                {
-                    "eval/win_rate_vs_heuristic": eval_result.win_rate,
-                    "eval/avg_rank_vs_heuristic": eval_result.avg_rank,
-                    "eval/avg_points_vs_heuristic": eval_result.avg_points,
-                    "eval/seconds": time.monotonic() - eval_start,
-                },
-            )
+            eval_log = {
+                "eval/win_rate_vs_heuristic": eval_result.win_rate,
+                "eval/avg_rank_vs_heuristic": eval_result.avg_rank,
+                "eval/avg_points_vs_heuristic": eval_result.avg_points,
+                "eval/seconds": time.monotonic() - eval_start,
+            }
+
+            if config.gate_on_eval:
+                if eval_result.win_rate >= best_win_rate - config.gate_tolerance:
+                    best_win_rate = max(best_win_rate, eval_result.win_rate)
+                    best_state_dict = copy.deepcopy(net.state_dict())
+                    best_optimizer_state_dict = copy.deepcopy(optimizer.state_dict())
+                    eval_log["eval/gate_accepted"] = 1.0
+                else:
+                    # Reject this iteration's update: roll net/optimizer back to the
+                    # last accepted snapshot so the next iteration's self-play/train
+                    # continues from there instead of building on a regression - see
+                    # gate_on_eval's docstring for why (every unconditional-promotion
+                    # run observed in practice compounded a bad update instead).
+                    net.load_state_dict(best_state_dict)
+                    optimizer.load_state_dict(best_optimizer_state_dict)
+                    eval_log["eval/gate_accepted"] = 0.0
+                eval_log["eval/gate_best_win_rate"] = best_win_rate
+
+            metrics.log(step, eval_log)
 
         if config.checkpoint_dir is not None and state.iteration % config.checkpoint_every == 0:
             extra = {"config": asdict(config)}

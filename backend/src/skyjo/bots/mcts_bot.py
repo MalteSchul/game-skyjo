@@ -87,7 +87,31 @@ def list_available_models() -> list[str]:
     return sorted(p.stem for p in directory.glob("*.pt"))
 
 
-@functools.lru_cache(maxsize=None)
+def save_uploaded_model(filename: str, content: bytes) -> str:
+    """Saves an uploaded checkpoint into the models directory, making it
+    selectable via `list_available_models` / `evaluator_for_model` under a name
+    derived from `filename` (its stem, ignoring any directory components).
+    Rejects anything that isn't a loadable `save_checkpoint` payload so a bad
+    upload can't silently become an unusable "model" in the list. Clears the
+    `evaluator_for_model` cache so re-uploading an existing name picks up the
+    new weights instead of serving the previously cached network."""
+    name = Path(filename).stem
+    if not name or Path(filename).suffix.lower() != ".pt":
+        raise ValueError(f"save_uploaded_model: expected a .pt file, got {filename!r}")
+    directory = _models_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{name}.pt"
+    path.write_bytes(content)
+    try:
+        load_checkpoint(path, AlphaZeroNet())
+    except Exception as exc:
+        path.unlink(missing_ok=True)
+        raise ValueError(f"save_uploaded_model: {filename!r} isn't a valid checkpoint") from exc
+    evaluator_for_model.cache_clear()
+    return name
+
+
+@functools.cache
 def evaluator_for_model(model_name: str) -> EvaluateFn:
     """Evaluator for a named checkpoint from the models directory. Cached per
     model name (like `default_evaluator`) so selecting the same model for

@@ -306,3 +306,43 @@ def test_rank_probs_is_none_for_a_state_missing_from_the_lookup():
     tree = tree_to_dict(root, rank_probs_by_state=lookup)
 
     assert tree["rank_probs"] is None
+
+
+# --- points_pred_by_state ---------------------------------------------------------
+
+
+def test_points_pred_is_none_when_no_lookup_is_given():
+    state = _awaiting_draw_state(seed=5)
+    root = run_mcts(
+        Turn.from_state(state), _uniform_evaluate, num_simulations=1, rng=np.random.default_rng(0)
+    )
+
+    tree = tree_to_dict(root)
+
+    assert tree["points_pred"] is None
+
+
+def test_points_pred_is_looked_up_by_the_nodes_own_state():
+    state = _awaiting_draw_state(seed=5)
+    root = run_mcts(
+        Turn.from_state(state), _uniform_evaluate, num_simulations=1, rng=np.random.default_rng(0)
+    )
+    # keyed by root.state, not the original `state` passed to run_mcts - same
+    # reasoning as rank_probs_by_state above.
+    lookup = {root.state: np.array([0.4, 0.9])}
+
+    tree = tree_to_dict(root, points_pred_by_state=lookup)
+
+    assert tree["points_pred"] == [0.4, 0.9]
+
+
+def test_points_pred_is_none_for_a_state_missing_from_the_lookup():
+    state = _awaiting_draw_state(seed=5)
+    root = run_mcts(
+        Turn.from_state(state), _uniform_evaluate, num_simulations=1, rng=np.random.default_rng(0)
+    )
+    lookup: dict = {}  # deliberately doesn't contain `state`
+
+    tree = tree_to_dict(root, points_pred_by_state=lookup)
+
+    assert tree["points_pred"] is None

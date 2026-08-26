@@ -6,13 +6,6 @@ from skyjo.api.store import AutoplayStatus, MatchBusyError, MatchStore
 from skyjo.domain.engine import Action, ActionType, apply_action, new_match
 from skyjo.domain.observation import Turn
 
-# test_an_exception_in_work_still_resets_status_to_idle deliberately raises
-# inside a background thread; pytest's unhandled-thread-exception capture
-# fires once that thread's excepthook actually runs, which can race past the
-# end of that specific test and land on whichever test happens to be running
-# next - so the filter is applied file-wide rather than on that one test.
-pytestmark = pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
-
 # --- fixture helpers ---------------------------------------------------------
 
 
@@ -162,7 +155,7 @@ def test_a_second_trigger_while_one_is_running_reuses_the_same_event():
     assert first_event.wait(timeout=2.0)
 
 
-def test_an_exception_in_work_still_resets_status_to_idle():
+def test_an_exception_in_work_still_resets_status_to_idle(monkeypatch):
     store = MatchStore()
     match_id = _new_match_id(store)
 
@@ -171,7 +164,12 @@ def test_an_exception_in_work_still_resets_status_to_idle():
         raise RuntimeError("boom")
 
     # The exception is expected to escape the background thread - there's
-    # nothing there to catch it. See the module-level filterwarnings above.
+    # nothing there to catch it. Silence the default threading.excepthook for
+    # it deterministically (rather than a pytest warnings filter, whose
+    # capture fires whenever the thread's excepthook happens to run - which
+    # can race past the end of this test and land on whichever test is
+    # running next).
+    monkeypatch.setattr(threading, "excepthook", lambda args: None)
     event = store.trigger_autoplay(match_id, work)
 
     assert event.wait(timeout=2.0)

@@ -10,6 +10,7 @@ const DECISION_NODE: DecisionNode = {
   visit_count: 0,
   value: null,
   rank_probs: null,
+  points_pred: null,
   edges: [],
 }
 

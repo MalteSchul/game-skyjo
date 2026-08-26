@@ -327,6 +327,36 @@ def test_get_mcts_models_lists_checkpoints_in_the_models_dir(tmp_path, monkeypat
     assert response.json() == ["strong"]
 
 
+def test_upload_mcts_model_adds_it_to_the_available_list(tmp_path, monkeypatch):
+    from skyjo.rl.checkpoint import save_checkpoint
+    from skyjo.rl.network import AlphaZeroNet
+
+    monkeypatch.setenv("SKYJO_MCTS_MODELS_DIR", str(tmp_path / "models"))
+    source = tmp_path / "source.pt"
+    save_checkpoint(source, AlphaZeroNet(), None, iteration=1, total_train_steps=1)
+
+    response = client.post(
+        "/matches/mcts-models",
+        files={"file": ("uploaded.pt", source.read_bytes(), "application/octet-stream")},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == "uploaded"
+    assert client.get("/matches/mcts-models").json() == ["uploaded"]
+
+
+def test_upload_mcts_model_rejects_a_non_checkpoint_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("SKYJO_MCTS_MODELS_DIR", str(tmp_path))
+
+    response = client.post(
+        "/matches/mcts-models",
+        files={"file": ("bad.pt", b"not a checkpoint", "application/octet-stream")},
+    )
+
+    assert response.status_code == 400
+    assert client.get("/matches/mcts-models").json() == []
+
+
 def test_create_match_with_an_unknown_mcts_model_is_rejected():
     response = client.post(
         "/matches",

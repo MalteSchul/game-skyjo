@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from skyjo.domain.action_equivalence import distinct_actions
+from skyjo.domain.deck import CARD_COUNTS
 from skyjo.domain.engine import (
     MAX_PLAYERS,
     MIN_PLAYERS,
@@ -18,6 +19,7 @@ from skyjo.rl.action_space import ACTION_SPACE_SIZE
 from skyjo.rl.encoding import (
     _ABSENT_VALUE,
     _BOARD_FEATURES,
+    _N_DECK_VALUES,
     GLOBAL_FEATURES,
     INPUT_DIM,
     N_MAX_PLAYERS,
@@ -27,6 +29,7 @@ from skyjo.rl.encoding import (
 )
 
 _BOARD_BLOCK_SIZE = N_MAX_PLAYERS * _BOARD_FEATURES
+_DECK_HISTOGRAM = _BOARD_BLOCK_SIZE + GLOBAL_FEATURES - _N_DECK_VALUES
 # Offsets into the global-feature block, matching encode_state's build order.
 _DISCARD_TOP_PRESENT = _BOARD_BLOCK_SIZE + 0
 _DISCARD_TOP_VALUE = _BOARD_BLOCK_SIZE + 1
@@ -268,6 +271,43 @@ def test_board_card_value_feature_is_the_sentinel_while_face_down():
     value_features = board_block[0].reshape(-1, 3)[:, 2]
 
     assert np.all(value_features == _ABSENT_VALUE)
+
+
+# --- remaining-deck composition (card counting) -------------------------------
+
+
+def test_remaining_deck_histogram_only_docks_the_single_visible_discard_card():
+    # A fresh match has exactly one known card (the starting discard) and
+    # nothing else revealed yet - every other value should read as fully
+    # unseen (1.0), and the discarded value's own value should read as
+    # "one copy accounted for".
+    state = new_match(player_count=2, seed=1)
+    discard_value = state.discard[-1]
+
+    histogram = encode_state(state).features[_DECK_HISTOGRAM : _DECK_HISTOGRAM + _N_DECK_VALUES]
+
+    for (value, total), fraction in zip(CARD_COUNTS, histogram, strict=True):
+        expected = (total - 1) / total if value == discard_value else 1.0
+        assert fraction == pytest.approx(expected)
+
+
+def test_remaining_deck_histogram_ignores_face_down_cards():
+    # Flipping a card face-up must move its value's fraction; a card that
+    # stays face-down must never affect the histogram, even though its true
+    # value exists in `GameState` - it's genuinely unknown to every player.
+    state = new_match(player_count=2, seed=1)
+    before = encode_state(state).features[_DECK_HISTOGRAM : _DECK_HISTOGRAM + _N_DECK_VALUES].copy()
+
+    state = apply_action(state, Action(ActionType.FLIP_INITIAL, position=0))
+    flipped_value = state.boards[0].cards[0].value
+    after = encode_state(state).features[_DECK_HISTOGRAM : _DECK_HISTOGRAM + _N_DECK_VALUES]
+
+    value_index = [v for v, _ in CARD_COUNTS].index(flipped_value)
+    for i in range(_N_DECK_VALUES):
+        if i == value_index:
+            assert after[i] < before[i]
+        else:
+            assert after[i] == pytest.approx(before[i])
 
 
 def test_board_card_value_feature_is_distinguishable_from_the_lowest_real_card_once_flipped():

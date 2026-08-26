@@ -21,6 +21,7 @@ from skyjo.domain.engine import Action, GameState
 from skyjo.rl.mcts import DEFAULT_C_PUCT, ChanceEdge, ChanceNode, MCTSEdge, MCTSNode
 
 RankProbsByState = Mapping[GameState, np.ndarray]
+PointsPredByState = Mapping[GameState, np.ndarray]
 
 
 def _action_to_dict(action: Action) -> dict[str, Any]:
@@ -33,6 +34,7 @@ def tree_to_dict(
     max_depth: int | None = None,
     c_puct: float = DEFAULT_C_PUCT,
     rank_probs_by_state: RankProbsByState | None = None,
+    points_pred_by_state: PointsPredByState | None = None,
 ) -> dict[str, Any]:
     """`max_depth` counts edges from `node`: 0 means describe `node` itself
     with no children traversed (edges listed but each `child` omitted).
@@ -40,14 +42,15 @@ def tree_to_dict(
     search itself used (`run_mcts`'s default unless overridden) for the
     exported `q`/`u`/`puct_score` fields to mean anything - it's not stored
     on the tree itself, so there's no way to recover it after the fact.
-    `rank_probs_by_state`, if given, is looked up by each decision node's
-    `state` to fill in that node's `rank_probs` field - see
-    `evaluator.make_network_evaluator`'s `rank_probs_sink` param, which is
-    how such a mapping gets built in the first place. `None`/omitted means
-    every node's `rank_probs` comes back `null`."""
+    `rank_probs_by_state`/`points_pred_by_state`, if given, are looked up by
+    each decision node's `state` to fill in that node's `rank_probs`/
+    `points_pred` fields - see `evaluator.make_network_evaluator`'s
+    `rank_probs_sink`/`points_pred_sink` params, which is how such a mapping
+    gets built in the first place. Omitted means the corresponding field
+    comes back `null` for every node."""
     if isinstance(node, ChanceNode):
-        return _chance_node_to_dict(node, max_depth, c_puct, rank_probs_by_state)
-    return _mcts_node_to_dict(node, max_depth, c_puct, rank_probs_by_state)
+        return _chance_node_to_dict(node, max_depth, c_puct, rank_probs_by_state, points_pred_by_state)
+    return _mcts_node_to_dict(node, max_depth, c_puct, rank_probs_by_state, points_pred_by_state)
 
 
 def _descend(
@@ -55,13 +58,20 @@ def _descend(
     max_depth: int | None,
     c_puct: float,
     rank_probs_by_state: RankProbsByState | None,
+    points_pred_by_state: PointsPredByState | None,
 ) -> dict[str, Any] | None:
     if child is None:
         return None
     if max_depth is not None and max_depth <= 0:
         return None
     next_depth = None if max_depth is None else max_depth - 1
-    return tree_to_dict(child, max_depth=next_depth, c_puct=c_puct, rank_probs_by_state=rank_probs_by_state)
+    return tree_to_dict(
+        child,
+        max_depth=next_depth,
+        c_puct=c_puct,
+        rank_probs_by_state=rank_probs_by_state,
+        points_pred_by_state=points_pred_by_state,
+    )
 
 
 def _mcts_edge_to_dict(
@@ -69,6 +79,7 @@ def _mcts_edge_to_dict(
     max_depth: int | None,
     c_puct: float,
     rank_probs_by_state: RankProbsByState | None,
+    points_pred_by_state: PointsPredByState | None,
     *,
     current_player: int,
     parent_visit_count: int,
@@ -90,12 +101,16 @@ def _mcts_edge_to_dict(
         "q": q,
         "u": u,
         "puct_score": q + u,
-        "child": _descend(edge.child, max_depth, c_puct, rank_probs_by_state),
+        "child": _descend(edge.child, max_depth, c_puct, rank_probs_by_state, points_pred_by_state),
     }
 
 
 def _chance_edge_to_dict(
-    edge: ChanceEdge, max_depth: int | None, c_puct: float, rank_probs_by_state: RankProbsByState | None
+    edge: ChanceEdge,
+    max_depth: int | None,
+    c_puct: float,
+    rank_probs_by_state: RankProbsByState | None,
+    points_pred_by_state: PointsPredByState | None,
 ) -> dict[str, Any]:
     # Exported as "card_value", not "value": a decision node's "value" means
     # the network's predicted utility vector (see _mcts_node_to_dict) - an
@@ -109,17 +124,22 @@ def _chance_edge_to_dict(
         "mean_value": edge.value_sum.tolist()
         if edge.visit_count == 0
         else (edge.value_sum / edge.visit_count).tolist(),
-        "child": _descend(edge.child, max_depth, c_puct, rank_probs_by_state),
+        "child": _descend(edge.child, max_depth, c_puct, rank_probs_by_state, points_pred_by_state),
     }
 
 
 def _mcts_node_to_dict(
-    node: MCTSNode, max_depth: int | None, c_puct: float, rank_probs_by_state: RankProbsByState | None
+    node: MCTSNode,
+    max_depth: int | None,
+    c_puct: float,
+    rank_probs_by_state: RankProbsByState | None,
+    points_pred_by_state: PointsPredByState | None,
 ) -> dict[str, Any]:
     edges = sorted(node.edges.values(), key=lambda e: e.visit_count, reverse=True)
     parent_visit_count = node.visit_count
     current_player = node.state.current_player
     rank_probs = None if rank_probs_by_state is None else rank_probs_by_state.get(node.state)
+    points_pred = None if points_pred_by_state is None else points_pred_by_state.get(node.state)
     return {
         "kind": "decision",
         "current_player": current_player,
@@ -135,12 +155,18 @@ def _mcts_node_to_dict(
         # when the evaluator was given a `rank_probs_sink` (see docstring
         # above), otherwise always null.
         "rank_probs": None if rank_probs is None else rank_probs.tolist(),
+        # points_pred[i] = the auxiliary points_head's predicted final
+        # normalized score for player i - a magnitude signal `rank_probs`
+        # can't express (see `network.AlphaZeroNet.points_head`), only
+        # available when the evaluator was given a `points_pred_sink`.
+        "points_pred": None if points_pred is None else points_pred.tolist(),
         "edges": [
             _mcts_edge_to_dict(
                 edge,
                 max_depth,
                 c_puct,
                 rank_probs_by_state,
+                points_pred_by_state,
                 current_player=current_player,
                 parent_visit_count=parent_visit_count,
             )
@@ -150,10 +176,17 @@ def _mcts_node_to_dict(
 
 
 def _chance_node_to_dict(
-    node: ChanceNode, max_depth: int | None, c_puct: float, rank_probs_by_state: RankProbsByState | None
+    node: ChanceNode,
+    max_depth: int | None,
+    c_puct: float,
+    rank_probs_by_state: RankProbsByState | None,
+    points_pred_by_state: PointsPredByState | None,
 ) -> dict[str, Any]:
     edges = sorted(node.edges.values(), key=lambda e: e.visit_count, reverse=True)
     return {
         "kind": "chance",
-        "edges": [_chance_edge_to_dict(edge, max_depth, c_puct, rank_probs_by_state) for edge in edges],
+        "edges": [
+            _chance_edge_to_dict(edge, max_depth, c_puct, rank_probs_by_state, points_pred_by_state)
+            for edge in edges
+        ],
     }

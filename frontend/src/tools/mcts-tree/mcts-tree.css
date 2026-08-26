@@ -696,6 +696,11 @@ body.mcts-tools-page #root {
   gap: 10px;
   align-items: center;
 }
+/* No diverging-meter column (points_pred isn't centered on zero like value
+   is) - just a label and a right-aligned number. */
+.mtx-value-row--compact {
+  grid-template-columns: 32px 60px;
+}
 .mtx-value-row-label {
   font-family: var(--mono);
   font-size: 12.5px;
@@ -734,6 +739,15 @@ body.mcts-tools-page #root {
 .mtx-rankprobs-table td {
   background: color-mix(in oklab, var(--accent) calc(var(--w, 0) * 55%), var(--bg-panel));
   color: var(--text-h);
+}
+
+.mtx-points-wrap {
+  margin-top: 12px;
+}
+.mtx-points-caption {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
 }
 
 /* ---------- snapshot scrubber ---------- */

@@ -12,7 +12,13 @@ def _sample(tag: int) -> ReplaySample:
     state = new_match(player_count=2, seed=tag)
     pi = np.zeros(ACTION_SPACE_SIZE, dtype=np.float32)
     pi[0] = 1.0
-    return ReplaySample(state=state, n_act=2, pi=pi, y=np.array([0, 1], dtype=np.int64))
+    return ReplaySample(
+        state=state,
+        n_act=2,
+        pi=pi,
+        y=np.array([0, 1], dtype=np.int64),
+        points_y=np.array([0.2, 0.5], dtype=np.float32),
+    )
 
 
 # --- happy path ------------------------------------------------------------

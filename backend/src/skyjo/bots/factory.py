@@ -9,7 +9,12 @@ from __future__ import annotations
 
 from skyjo.bots.base import Bot
 from skyjo.bots.heuristic_bot import HeuristicBot
-from skyjo.bots.mcts_bot import MctsBot, default_evaluator, default_num_simulations, evaluator_for_model
+from skyjo.bots.mcts_bot import (
+    MctsBot,
+    default_evaluator,
+    default_num_simulations,
+    evaluator_for_model,
+)
 from skyjo.bots.random_bot import RandomBot
 from skyjo.bots.thinking_bot import ThinkingBot
 

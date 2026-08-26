@@ -1,12 +1,13 @@
 import type { CSSProperties } from 'react'
 import type { DecisionNode } from './types'
-import { fmtPct, fmtSigned } from './treeUtils'
+import { fmtNum, fmtPct, fmtSigned } from './treeUtils'
 import { DivergingMeter } from './meters'
 
 /** The network's own prediction for one decision node: its raw `value`
- * vector and, when available, the `rank_probs` it's a linear weighting of.
- * Collapsed behind a toggle in the caller — this is the "why" behind a
- * node's numbers, read on demand rather than taking up a table row. */
+ * vector, and — when available — the `rank_probs` it's a linear weighting
+ * of and the auxiliary `points_pred` head's own take on each player's final
+ * score. Collapsed behind a toggle in the caller — this is the "why" behind
+ * a node's numbers, read on demand rather than taking up a table row. */
 export default function ValuePanel({ node }: { node: DecisionNode }) {
   return (
     <div className="mtx-value-panel">
@@ -54,6 +55,22 @@ export default function ValuePanel({ node }: { node: DecisionNode }) {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {node.points_pred && (
+        <div className="mtx-points-wrap">
+          <div className="mtx-points-caption">points_pred — predicted final score (normalized)</div>
+          <div className="mtx-value-rows">
+            {node.points_pred.map((p, i) => (
+              <div className="mtx-value-row mtx-value-row--compact" key={i}>
+                <span className="mtx-value-row-label" style={{ color: `var(--mtx-player-${i % 8})` }}>
+                  P{i}
+                </span>
+                <span className="mtx-value-row-num">{fmtNum(p, 3)}</span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>

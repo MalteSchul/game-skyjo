@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from skyjo.api.schemas import (
     ActionRequest,
@@ -17,7 +17,7 @@ from skyjo.api.store import (
 )
 from skyjo.bots.base import ExposesSearchTree
 from skyjo.bots.factory import create_bot
-from skyjo.bots.mcts_bot import list_available_models
+from skyjo.bots.mcts_bot import list_available_models, save_uploaded_model
 from skyjo.domain.engine import (
     Action,
     GameState,
@@ -50,6 +50,20 @@ def get_mcts_models() -> list[str]:
     `bots.mcts_bot.list_available_models`. Registered ahead of the
     "/{match_id}" GET route so "mcts-models" isn't parsed as a match id."""
     return list_available_models()
+
+
+@router.post("/mcts-models", response_model=str)
+async def upload_mcts_model(file: UploadFile = File(...)) -> str:  # noqa: B008 - FastAPI's own dependency-injection idiom, evaluated by FastAPI itself, not on each call
+    """Uploads a checkpoint file (as saved by `rl.checkpoint.save_checkpoint`)
+    and makes it selectable as an mcts_bot seat's `mcts_model` under a name
+    derived from the uploaded filename. Returns that name."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="missing filename")
+    content = await file.read()
+    try:
+        return save_uploaded_model(file.filename, content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("", response_model=MatchStateOut, status_code=201)

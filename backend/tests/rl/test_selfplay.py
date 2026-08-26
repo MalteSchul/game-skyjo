@@ -54,9 +54,15 @@ def test_generate_episode_produces_consistent_samples_for_a_full_match():
         assert sample.pi.shape == (ACTION_SPACE_SIZE,)
         assert sample.pi.sum() == pytest.approx(1.0, abs=1e-4)
         assert sample.y.shape == (2,)
-    # the final ranks are the same object recorded at every decision step
+        assert sample.points_y.shape == (2,)
+    # the final ranks/points are the same object recorded at every decision step
     assert {tuple(s.y) for s in samples} == {tuple(samples[-1].y)}
+    assert {tuple(s.points_y.tolist()) for s in samples} == {tuple(samples[-1].points_y.tolist())}
     assert sorted(samples[-1].y.tolist()) == [0, 1]  # a strict permutation for 2 players
+    # y and points_y must agree on who did better: the lower-ranked (y=0) player
+    # has the lower (better, since Skyjo scores low-to-win) final points.
+    better, worse = list(samples[-1].y).index(0), list(samples[-1].y).index(1)
+    assert samples[-1].points_y[better] <= samples[-1].points_y[worse]
 
 
 def test_generate_episode_accepts_a_callable_tau_schedule():
@@ -100,7 +106,13 @@ def test_generate_episode_widens_a_tied_representative_to_a_uniformly_sampled_re
         state = new_match(player_count=2, seed=1)
         turn = Turn.from_state(state)
         samples = generate_episode(
-            state, _uniform_evaluate, num_simulations=1, rng=np.random.default_rng(seed), max_steps=3000
+            state,
+            _uniform_evaluate,
+            num_simulations=1,
+            rng=np.random.default_rng(seed),
+            max_steps=3000,
+            round_max_steps=200,
+            max_rounds=10,
         )
         first_decision_argmax.add(int(np.argmax(samples[0].pi)))
         after_board = samples[1].state.boards[turn.acting_player]
@@ -242,7 +254,13 @@ def test_generate_episodes_batch_widens_a_tied_representative_to_a_uniformly_sam
         state = new_match(player_count=2, seed=1)
         turn = Turn.from_state(state)
         results = generate_episodes_batch(
-            [state], _batch_evaluate, num_simulations=1, rngs=[np.random.default_rng(seed)], max_steps=3000
+            [state],
+            _batch_evaluate,
+            num_simulations=1,
+            rngs=[np.random.default_rng(seed)],
+            max_steps=3000,
+            round_max_steps=200,
+            max_rounds=10,
         )
         after_board = results[0][1].state.boards[turn.acting_player]
         flipped = next(i for i, c in enumerate(after_board.cards) if c is not None and c.face_up)

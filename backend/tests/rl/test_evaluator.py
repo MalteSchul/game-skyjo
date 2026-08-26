@@ -2,11 +2,12 @@ from dataclasses import replace
 
 import numpy as np
 import pytest
+import torch
 
 from skyjo.domain.action_equivalence import distinct_actions
-from skyjo.domain.engine import GameState, legal_actions, new_match
+from skyjo.domain.engine import GameState, apply_action, legal_actions, new_match
 from skyjo.domain.observation import Turn
-from skyjo.rl.encoding import N_MAX_PLAYERS
+from skyjo.rl.encoding import N_MAX_PLAYERS, encode_state
 from skyjo.rl.evaluator import (
     _play_one_eval_game,
     evaluate_vs_heuristic,
@@ -100,6 +101,48 @@ def test_value_is_the_rank_probs_weighted_by_the_fixed_rank_utility_mapping():
     np.testing.assert_allclose(reconstructed, value, atol=1e-4)
 
 
+def test_rank_probs_sink_is_un_rotated_to_absolute_player_order():
+    # `evaluate` runs the net on canonical (current-player-at-slot-0) input,
+    # but the sink is documented to expose `rank_probs[i, r]` for absolute
+    # player i - if the un-rotation in evaluator.py ever got dropped or
+    # inverted, this state's rotation (current_player=1, a genuine rotation
+    # for n_act=3) would make every other rank_probs test above still pass
+    # (they only check shape/sums/the value-reconstruction identity, which
+    # are rotation-invariant) while silently mislabeling which row belongs
+    # to which player.
+    state = new_match(player_count=3, seed=1)
+    while state.current_player == 0:
+        action = next(iter(legal_actions(state)))
+        state = apply_action(state, action)
+    net = _tiny_net()
+    net.eval()
+
+    encoding = encode_state(state)
+    assert encoding.perm[0] == state.current_player
+    assert state.current_player != 0  # non-trivial rotation, not the identity perm
+
+    sink: dict[GameState, np.ndarray] = {}
+    evaluate = make_network_evaluator(net, rank_probs_sink=sink)
+    evaluate(state)
+
+    n = 3
+    perm = encoding.perm[:n]
+    with torch.no_grad():
+        features = torch.from_numpy(encoding.features).unsqueeze(0)
+        mask = torch.from_numpy(encoding.legal_action_mask).unsqueeze(0)
+        active_count = torch.tensor([n], dtype=torch.long)
+        _policy_probs, rank_probs, _utility, _points_pred = net(features, mask, active_count)
+    rank_probs_canonical = rank_probs[0, :n, :n].numpy()
+
+    expected_abs = np.empty_like(rank_probs_canonical)
+    expected_abs[perm] = rank_probs_canonical
+    np.testing.assert_allclose(sink[state], expected_abs)
+    # And directly: the row for absolute player `perm[0]` (== current_player,
+    # canonical slot 0) must equal the canonical slot-0 row, not some other
+    # player's row unless perm happens to be the identity.
+    np.testing.assert_allclose(sink[state][state.current_player], rank_probs_canonical[0])
+
+
 def test_rank_probs_sink_only_holds_the_active_n_by_n_slice():
     # active_count for a 2-player match is 2 - the network's rank head is
     # sized for up to N_MAX_PLAYERS, but the sink should only ever expose the
@@ -112,6 +155,57 @@ def test_rank_probs_sink_only_holds_the_active_n_by_n_slice():
     evaluate(state)
 
     assert sink[state].shape == (2, 2)
+
+
+def test_points_pred_sink_is_untouched_when_not_given():
+    state = new_match(player_count=2, seed=1)
+    evaluate = make_network_evaluator(_tiny_net())
+
+    evaluate(state)  # no sink passed - nothing to assert on, just must not raise
+
+
+def test_points_pred_sink_is_filled_in_as_a_side_effect():
+    state = new_match(player_count=3, seed=1)
+    sink: dict[GameState, np.ndarray] = {}
+    evaluate = make_network_evaluator(_tiny_net(), points_pred_sink=sink)
+
+    evaluate(state)
+
+    assert state in sink
+    assert sink[state].shape == (3,)
+
+
+def test_points_pred_sink_only_holds_the_active_slice():
+    # Same reasoning as test_rank_probs_sink_only_holds_the_active_n_by_n_slice:
+    # points_head is sized for up to N_MAX_PLAYERS, but the sink should only
+    # ever expose the slice that's actually meaningful for this state.
+    state = new_match(player_count=2, seed=1)
+    assert N_MAX_PLAYERS > 2
+    sink: dict[GameState, np.ndarray] = {}
+    evaluate = make_network_evaluator(_tiny_net(), points_pred_sink=sink)
+
+    evaluate(state)
+
+    assert sink[state].shape == (2,)
+
+
+def test_evaluate_un_rotates_points_pred_sink_back_to_absolute_player_index():
+    # Same construction as test_evaluate_un_rotates_value_back_to_absolute_player_index.
+    net = _tiny_net()
+    state = new_match(player_count=3, seed=1)
+    rotated_sink: dict[GameState, np.ndarray] = {}
+    mirror_sink: dict[GameState, np.ndarray] = {}
+    evaluate_rotated = make_network_evaluator(net, points_pred_sink=rotated_sink)
+    evaluate_mirror = make_network_evaluator(net, points_pred_sink=mirror_sink)
+
+    rotated_state = replace(state, current_player=1)
+    mirror_state = replace(state, boards=(state.boards[1], state.boards[2], state.boards[0]), current_player=0)
+
+    evaluate_rotated(rotated_state)
+    evaluate_mirror(mirror_state)
+
+    for slot in range(3):
+        assert rotated_sink[rotated_state][(1 + slot) % 3] == pytest.approx(mirror_sink[mirror_state][slot])
 
 
 # --- output un-rotation: canonical (rotated) network output must map back ---
@@ -266,8 +360,12 @@ def test_evaluate_vs_heuristic_plays_the_requested_number_of_games():
 def test_evaluate_vs_heuristic_is_deterministic_for_the_same_seed_and_weights():
     net = _tiny_net()
 
-    first = evaluate_vs_heuristic(net, 3, num_simulations=2, max_steps=2000, seed=5)
-    second = evaluate_vs_heuristic(net, 3, num_simulations=2, max_steps=2000, seed=5)
+    first = evaluate_vs_heuristic(
+        net, 3, num_simulations=2, max_steps=2000, round_max_steps=200, max_rounds=10, seed=5
+    )
+    second = evaluate_vs_heuristic(
+        net, 3, num_simulations=2, max_steps=2000, round_max_steps=200, max_rounds=10, seed=5
+    )
 
     assert first == second
 

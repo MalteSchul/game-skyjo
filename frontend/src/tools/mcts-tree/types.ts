@@ -28,6 +28,7 @@ export interface DecisionNode {
   visit_count: number
   value: number[] | null
   rank_probs: number[][] | null
+  points_pred: number[] | null
   edges: DecisionEdge[]
 }
 

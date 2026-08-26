@@ -69,6 +69,7 @@ def make_network_evaluator(
     device: str | torch.device = "cpu",
     *,
     rank_probs_sink: MutableMapping[GameState, np.ndarray] | None = None,
+    points_pred_sink: MutableMapping[GameState, np.ndarray] | None = None,
 ) -> EvaluateFn:
     """`rank_probs_sink`, if given, is filled in as a side effect of every
     `evaluate` call: `sink[state]` becomes that state's `rank_probs[i, r]` =
@@ -76,12 +77,16 @@ def make_network_evaluator(
     already runs to get `value` (`value` is in fact just `rank_probs`
     reduced by a fixed linear weighting - see `AlphaZeroNet.forward`'s
     docstring - so this is strictly more information from work already
-    being done, not an extra network call).
+    being done, not an extra network call). `points_pred_sink`, if given, is
+    filled in the same way with `points_pred` - each player's predicted
+    final normalized score (see `AlphaZeroNet.points_head`), the auxiliary
+    head's own take on "how well is this player doing" rather than
+    `rank_probs`'s ordinal one.
 
     Exists only for diagnostics (`scripts/dump_mcts_tree.py --network`) - training/self-play
-    never pass it, so `EvaluateFn`'s contract for every other caller is
-    untouched, and the `.cpu().numpy()` conversion for `rank_probs` doesn't
-    even run when no sink is given.
+    never pass either sink, so `EvaluateFn`'s contract for every other caller
+    is untouched, and the `.cpu().numpy()` conversion for `rank_probs`/
+    `points_pred` doesn't even run when no sink is given for it.
     """
     net.to(device)
     net.eval()
@@ -94,7 +99,7 @@ def make_network_evaluator(
             features = torch.from_numpy(encoding.features).unsqueeze(0).to(device)
             mask = torch.from_numpy(encoding.legal_action_mask).unsqueeze(0).to(device)
             active_count = torch.tensor([encoding.active_count], dtype=torch.long, device=device)
-            policy_probs, rank_probs, utility = net(features, mask, active_count)
+            policy_probs, rank_probs, utility, points_pred = net(features, mask, active_count)
 
         policy_probs = policy_probs[0].cpu().numpy()
         priors = {
@@ -112,6 +117,11 @@ def make_network_evaluator(
             rank_probs_abs = np.empty_like(rank_probs_canonical)
             rank_probs_abs[perm] = rank_probs_canonical
             rank_probs_sink[state] = rank_probs_abs
+        if points_pred_sink is not None:
+            points_pred_canonical = points_pred[0, :n].cpu().numpy()
+            points_pred_abs = np.empty_like(points_pred_canonical)
+            points_pred_abs[perm] = points_pred_canonical
+            points_pred_sink[state] = points_pred_abs
         return priors, value
 
     return evaluate
@@ -151,7 +161,7 @@ def make_batch_network_evaluator(
             active_count = torch.tensor(
                 [e.active_count for e in encodings], dtype=torch.long, device=device
             )
-            policy_probs, _rank_probs, utility = net(features, mask, active_count)
+            policy_probs, _rank_probs, utility, _points_pred = net(features, mask, active_count)
 
         policy_probs = policy_probs.cpu().numpy()
         utility = utility.cpu().numpy()

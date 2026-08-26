@@ -124,6 +124,11 @@ def main() -> None:
                     selfplay_batch_size=batch_size,
                     seed=args.seed,
                     max_steps_per_episode=args.max_steps,
+                    # Disabled by default (selfplay.py's DEFAULT_ROUND_MAX_STEPS/
+                    # DEFAULT_MAX_ROUNDS) - re-enable explicitly so --max-steps stays
+                    # meaningful, per this argument's own help text below.
+                    round_max_steps=200,
+                    max_rounds=10,
                 )
                 result = _run_scenario(net, config, seed=args.seed)
                 row = {"workers": workers, "batch_size": batch_size, **result}

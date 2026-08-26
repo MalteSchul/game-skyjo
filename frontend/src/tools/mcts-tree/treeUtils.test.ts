@@ -39,6 +39,7 @@ const TERMINAL_LEAF: DecisionNode = {
   visit_count: 10,
   value: [1, -1],
   rank_probs: null,
+  points_pred: null,
   edges: [],
 }
 
@@ -55,6 +56,7 @@ const LEAF2: DecisionNode = {
   visit_count: 0,
   value: null,
   rank_probs: null,
+  points_pred: null,
   edges: [],
 }
 
@@ -66,6 +68,7 @@ const ROOT: DecisionNode = {
   visit_count: 12,
   value: [0.2, -0.2],
   rank_probs: null,
+  points_pred: null,
   edges: [
     decisionEdge({ action: { type: 'DRAW_STOCK', position: null }, visit_count: 10, child: CHANCE }),
     decisionEdge({ action: { type: 'DRAW_DISCARD', position: null }, visit_count: 2, child: LEAF2 }),

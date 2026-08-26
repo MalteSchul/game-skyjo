@@ -1,10 +1,11 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import { getMctsModels } from '../api/matchClient'
+import { getMctsModels, uploadMctsModel } from '../api/matchClient'
 import NewMatchForm from './NewMatchForm'
 
 vi.mock('../api/matchClient', () => ({
   getMctsModels: vi.fn().mockResolvedValue([]),
+  uploadMctsModel: vi.fn(),
 }))
 
 describe('NewMatchForm', () => {
@@ -84,6 +85,41 @@ describe('NewMatchForm', () => {
       [null, 'strong'],
       [null, null],
     )
+  })
+
+  it('lets an MCTS bot seat pick a model by uploading a file (happy path)', async () => {
+    vi.mocked(uploadMctsModel).mockResolvedValueOnce('uploaded')
+    const onCreate = vi.fn()
+    render(<NewMatchForm onCreate={onCreate} submitting={false} />)
+
+    fireEvent.change(screen.getByLabelText('Player 2 type'), { target: { value: 'mcts_bot' } })
+    const file = new File(['checkpoint bytes'], 'uploaded.pt')
+    fireEvent.change(await screen.findByLabelText('Player 2 model file'), { target: { files: [file] } })
+
+    expect(uploadMctsModel).toHaveBeenCalledWith(file)
+    await waitFor(() => expect(screen.getByLabelText('Player 2 model')).toHaveValue('uploaded'))
+    fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
+
+    expect(onCreate).toHaveBeenCalledWith(
+      2,
+      undefined,
+      ['', ''],
+      ['human', 'mcts_bot'],
+      [null, 'uploaded'],
+      [null, null],
+    )
+  })
+
+  it('shows an error and leaves the model unset when uploading a file fails (sad path)', async () => {
+    vi.mocked(uploadMctsModel).mockRejectedValueOnce(new Error('not a checkpoint'))
+    render(<NewMatchForm onCreate={vi.fn()} submitting={false} />)
+
+    fireEvent.change(screen.getByLabelText('Player 2 type'), { target: { value: 'mcts_bot' } })
+    const file = new File(['garbage'], 'bad.pt')
+    fireEvent.change(await screen.findByLabelText('Player 2 model file'), { target: { files: [file] } })
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('not a checkpoint')
+    expect(screen.getByLabelText('Player 2 model')).toHaveValue('')
   })
 
   it('lets an MCTS bot seat set a custom simulation count (happy path)', () => {

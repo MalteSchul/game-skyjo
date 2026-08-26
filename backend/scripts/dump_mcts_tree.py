@@ -31,8 +31,10 @@ untrained, its priors and per-state `value` are non-uniform and non-zero,
 because they actually depend on the encoded state. `--network` also captures
 each visited node's `rank_probs` (P(player i finishes at rank r), the
 un-reduced prediction `value` is a linear weighting of - see
-`evaluator.make_network_evaluator`'s `rank_probs_sink` param) from that same
-forward pass, at no extra network-call cost.
+`evaluator.make_network_evaluator`'s `rank_probs_sink` param) and
+`points_pred` (the auxiliary points_head's predicted final normalized score
+per player, see that same function's `points_pred_sink` param) from that
+same forward pass, at no extra network-call cost.
 
 Output is a JSON object keyed by simulation count (as a string). Every
 snapshot comes from the *same* search: `run_mcts`'s `on_root_ready` hands
@@ -72,16 +74,19 @@ def _uniform_evaluate(state: GameState):
     return priors, np.zeros(len(state.boards))
 
 
-def _build_network_evaluator(rank_probs_sink: dict[GameState, np.ndarray]) -> EvaluateFn:
+def _build_network_evaluator(
+    rank_probs_sink: dict[GameState, np.ndarray], points_pred_sink: dict[GameState, np.ndarray]
+) -> EvaluateFn:
     """Builds its own `AlphaZeroNet` rather than reusing
     `bots.mcts_bot.default_evaluator()` (which is `lru_cache`d and has no way
-    to pass a `rank_probs_sink`) - fine here since this script runs once and
-    exits, unlike a live bot process serving many seats off one warm net."""
+    to pass a `rank_probs_sink`/`points_pred_sink`) - fine here since this
+    script runs once and exits, unlike a live bot process serving many seats
+    off one warm net."""
     net = AlphaZeroNet()
     checkpoint_path = os.environ.get(CHECKPOINT_PATH_ENV_VAR)
     if checkpoint_path:
         load_checkpoint(checkpoint_path, net)
-    return make_network_evaluator(net, rank_probs_sink=rank_probs_sink)
+    return make_network_evaluator(net, rank_probs_sink=rank_probs_sink, points_pred_sink=points_pred_sink)
 
 
 def _parse_sim_points(raw: str) -> list[int]:
@@ -133,17 +138,26 @@ def main() -> None:
         state = new_match(player_count=args.players, seed=args.seed)
     turn = Turn.from_state(state)
     rank_probs_by_state: dict[GameState, np.ndarray] = {}
-    evaluate = _build_network_evaluator(rank_probs_by_state) if args.network else _uniform_evaluate
+    points_pred_by_state: dict[GameState, np.ndarray] = {}
+    evaluate = (
+        _build_network_evaluator(rank_probs_by_state, points_pred_by_state) if args.network else _uniform_evaluate
+    )
 
     snapshots: dict[str, dict] = {}
     target_points = set(args.sim_points)
     root_box: list[MCTSNode] = []
 
     def dump_snapshot(root: MCTSNode) -> dict:
-        # rank_probs_by_state keeps growing as the search visits more states -
-        # passing the same live dict at every snapshot means each one reports
-        # rank_probs for whatever's been visited *so far*, same as visit_count.
-        return tree_to_dict(root, max_depth=args.max_depth, rank_probs_by_state=rank_probs_by_state)
+        # rank_probs_by_state/points_pred_by_state keep growing as the search
+        # visits more states - passing the same live dicts at every snapshot
+        # means each one reports rank_probs/points_pred for whatever's been
+        # visited *so far*, same as visit_count.
+        return tree_to_dict(
+            root,
+            max_depth=args.max_depth,
+            rank_probs_by_state=rank_probs_by_state,
+            points_pred_by_state=points_pred_by_state,
+        )
 
     def on_root_ready(root: MCTSNode) -> None:
         root_box.append(root)

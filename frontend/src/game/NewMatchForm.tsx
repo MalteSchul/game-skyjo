@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { getMctsModels } from '../api/matchClient'
+import { getMctsModels, uploadMctsModel } from '../api/matchClient'
 import type { PlayerTypeName } from '../api/types'
 
 const MIN_PLAYERS = 2
@@ -66,6 +66,9 @@ function NewMatchForm({ onCreate, submitting }: NewMatchFormProps) {
   const [mctsModels, setMctsModels] = useState<(string | null)[]>([null, null])
   const [mctsNumSimulations, setMctsNumSimulations] = useState<(number | null)[]>([null, null])
   const [availableMctsModels, setAvailableMctsModels] = useState<string[]>([])
+  // Seat index currently uploading a model file, or null - drives the "uploading…" state.
+  const [uploadingSeat, setUploadingSeat] = useState<number | null>(null)
+  const [uploadError, setUploadError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -113,6 +116,21 @@ function NewMatchForm({ onCreate, submitting }: NewMatchFormProps) {
 
   function handleMctsModelChange(index: number, value: string | null) {
     setMctsModels((prev) => prev.map((model, i) => (i === index ? value : model)))
+  }
+
+  async function handleMctsModelFileChange(index: number, file: File | undefined) {
+    if (!file) return
+    setUploadingSeat(index)
+    setUploadError(null)
+    try {
+      const name = await uploadMctsModel(file)
+      setAvailableMctsModels((prev) => (prev.includes(name) ? prev : [...prev, name].sort()))
+      handleMctsModelChange(index, name)
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : 'Upload failed')
+    } finally {
+      setUploadingSeat(null)
+    }
   }
 
   function handleMctsNumSimulationsChange(index: number, value: number | null) {
@@ -207,6 +225,21 @@ function NewMatchForm({ onCreate, submitting }: NewMatchFormProps) {
                 </label>
               )}
               {playerTypes[i] === 'mcts_bot' && (
+                <label className="field player-mcts-model-upload-field">
+                  <span className="field-label">Player {i + 1} model file</span>
+                  <input
+                    type="file"
+                    accept=".pt"
+                    disabled={uploadingSeat === i}
+                    onChange={(event) => {
+                      void handleMctsModelFileChange(i, event.target.files?.[0])
+                      event.target.value = ''
+                    }}
+                  />
+                  {uploadingSeat === i && <span className="field-hint">Uploading…</span>}
+                </label>
+              )}
+              {playerTypes[i] === 'mcts_bot' && (
                 <label className="field player-mcts-simulations-field">
                   <span className="field-label">Player {i + 1} simulations</span>
                   <input
@@ -225,6 +258,11 @@ function NewMatchForm({ onCreate, submitting }: NewMatchFormProps) {
             </div>
           ))}
         </div>
+        {uploadError && (
+          <p role="alert" className="error-banner">
+            {uploadError}
+          </p>
+        )}
         <button type="submit" className="btn-primary" disabled={submitting}>
           {submitting ? 'Starting…' : 'Start match'}
         </button>

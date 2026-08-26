@@ -11,6 +11,7 @@ const BASE: DecisionNode = {
   visit_count: 5,
   value: null,
   rank_probs: null,
+  points_pred: null,
   edges: [],
 }
 
@@ -37,5 +38,17 @@ describe('ValuePanel', () => {
   it('omits the rank_probs table entirely when it was not captured (bad path: uniform stand-in evaluator)', () => {
     render(<ValuePanel node={{ ...BASE, value: [0, 0], rank_probs: null }} />)
     expect(screen.queryByText(/rank_probs/)).not.toBeInTheDocument()
+  })
+
+  it('renders a points_pred row per player when populated (happy path)', () => {
+    render(<ValuePanel node={{ ...BASE, value: [0.4, -0.4], points_pred: [0.62, 0.91] }} />)
+    expect(screen.getByText('points_pred — predicted final score (normalized)')).toBeInTheDocument()
+    expect(screen.getByText('0.620')).toBeInTheDocument()
+    expect(screen.getByText('0.910')).toBeInTheDocument()
+  })
+
+  it('omits the points_pred rows entirely when it was not captured (bad path: uniform stand-in evaluator)', () => {
+    render(<ValuePanel node={{ ...BASE, value: [0, 0], points_pred: null }} />)
+    expect(screen.queryByText(/points_pred/)).not.toBeInTheDocument()
   })
 })

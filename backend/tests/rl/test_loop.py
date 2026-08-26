@@ -1,3 +1,4 @@
+import copy
 import json
 import pickle
 
@@ -31,6 +32,11 @@ def _tiny_config(**overrides) -> TrainingConfig:
         "workers": 0,
         "selfplay_batch_size": 1,
         "seed": 0,
+        # Low num_simulations above has no pressure to reveal new information,
+        # so a round/game can run indefinitely without these - re-enable the
+        # (now default-disabled) safety valves explicitly for fast, bounded tests.
+        "round_max_steps": 200,
+        "max_rounds": 10,
     }
     defaults.update(overrides)
     return TrainingConfig(**defaults)
@@ -76,6 +82,16 @@ def test_training_config_rejects_unknown_selfplay_opponent():
 def test_training_config_rejects_heuristic_opponent_with_non_two_player():
     with pytest.raises(ValueError):
         _tiny_config(selfplay_opponent="heuristic", min_players=2, max_players=3)
+
+
+def test_training_config_rejects_negative_eval_workers():
+    with pytest.raises(ValueError):
+        _tiny_config(eval_workers=-1)
+
+
+def test_training_config_rejects_eval_batch_size_below_one():
+    with pytest.raises(ValueError):
+        _tiny_config(eval_batch_size=0)
 
 
 # --- round_max_steps/max_rounds wiring --------------------------------------
@@ -281,7 +297,8 @@ def test_run_training_loop_logs_eval_metrics_every_eval_every_iterations(tmp_pat
 
     monkeypatch.setattr(loop_module, "evaluate_vs_heuristic", fake_eval)
     config = _tiny_config(
-        iterations=1, eval_every=1, eval_games=7, eval_num_simulations=3, round_max_steps=11, max_rounds=2
+        iterations=1, eval_every=1, eval_games=7, eval_num_simulations=3, round_max_steps=11, max_rounds=2,
+        eval_workers=4, eval_batch_size=8,
     )
 
     with MetricsLogger(tmp_path / "logs") as metrics:
@@ -296,6 +313,10 @@ def test_run_training_loop_logs_eval_metrics_every_eval_every_iterations(tmp_pat
     # would otherwise hit the exact outer-max_steps-too-tight trap this valve exists to avoid.
     assert kwargs["round_max_steps"] == 11
     assert kwargs["max_rounds"] == 2
+    # eval_workers/eval_batch_size are a separate knob from self-play's own
+    # workers/selfplay_batch_size - passed through, not silently defaulted.
+    assert kwargs["workers"] == 4
+    assert kwargs["eval_batch_size"] == 8
 
     lines = [json.loads(line) for line in (tmp_path / "logs" / "metrics.jsonl").read_text().splitlines()]
     eval_records = [line for line in lines if "eval/win_rate_vs_heuristic" in line]
@@ -319,6 +340,123 @@ def test_run_training_loop_only_evaluates_on_eval_every_boundaries(tmp_path, mon
 
     # iterations 1, 2, 3 completed; only iteration 2 is a multiple of eval_every=2
     assert len(calls) == 1
+
+
+# --- run_training_loop: eval gating -----------------------------------------
+
+
+def test_training_config_gate_on_eval_requires_eval_every():
+    with pytest.raises(ValueError):
+        _tiny_config(gate_on_eval=True)
+
+
+def test_training_config_rejects_negative_gate_tolerance():
+    with pytest.raises(ValueError):
+        _tiny_config(gate_on_eval=True, eval_every=1, gate_tolerance=-0.1)
+
+
+def test_run_training_loop_gate_accepts_improving_evals(tmp_path, monkeypatch):
+    win_rates = iter([0.5, 0.6, 0.7])
+    monkeypatch.setattr(
+        loop_module,
+        "evaluate_vs_heuristic",
+        lambda *a, **k: HeuristicEvalResult(games_played=1, win_rate=next(win_rates), avg_rank=0.0, avg_points=0.0),
+    )
+    config = _tiny_config(iterations=3, eval_every=1, gate_on_eval=True)
+
+    with MetricsLogger(tmp_path / "logs") as metrics:
+        run_training_loop(config, metrics)
+
+    lines = [json.loads(line) for line in (tmp_path / "logs" / "metrics.jsonl").read_text().splitlines()]
+    gate_records = [line for line in lines if "eval/gate_accepted" in line]
+    assert [r["eval/gate_accepted"] for r in gate_records] == [1.0, 1.0, 1.0]
+    assert gate_records[-1]["eval/gate_best_win_rate"] == pytest.approx(0.7)
+
+
+def test_run_training_loop_gate_rejects_a_regressing_eval(tmp_path, monkeypatch):
+    win_rates = iter([0.7, 0.3])  # iter 1 accepted (beats the 0.0 initial floor); iter 2 regresses
+    monkeypatch.setattr(
+        loop_module,
+        "evaluate_vs_heuristic",
+        lambda *a, **k: HeuristicEvalResult(games_played=1, win_rate=next(win_rates), avg_rank=0.0, avg_points=0.0),
+    )
+    config = _tiny_config(iterations=2, eval_every=1, gate_on_eval=True)
+
+    with MetricsLogger(tmp_path / "logs") as metrics:
+        run_training_loop(config, metrics)
+
+    lines = [json.loads(line) for line in (tmp_path / "logs" / "metrics.jsonl").read_text().splitlines()]
+    gate_records = [line for line in lines if "eval/gate_accepted" in line]
+    assert [r["eval/gate_accepted"] for r in gate_records] == [1.0, 0.0]
+    # best_win_rate stays at the accepted iteration's value, not the rejected one
+    assert gate_records[-1]["eval/gate_best_win_rate"] == pytest.approx(0.7)
+
+
+def test_run_training_loop_gate_rejection_rolls_back_weights(tmp_path, monkeypatch):
+    # Two separate run_training_loop calls, resuming the same net/optimizer -
+    # mirrors how a real run would gate a later regression against an
+    # already-accepted checkpoint from an earlier call.
+    net = AlphaZeroNet(trunk_dim=8, num_residual_blocks=1)
+    optimizer = torch.optim.Adam(net.parameters(), lr=1e-2)
+
+    monkeypatch.setattr(
+        loop_module,
+        "evaluate_vs_heuristic",
+        lambda *a, **k: HeuristicEvalResult(games_played=1, win_rate=0.7, avg_rank=0.0, avg_points=0.0),
+    )
+    config_accept = _tiny_config(iterations=1, eval_every=1, gate_on_eval=True, network_kwargs={"trunk_dim": 8, "num_residual_blocks": 1})
+    with MetricsLogger(tmp_path / "logs1") as metrics:
+        run_training_loop(config_accept, metrics, net=net, optimizer=optimizer)
+    accepted_snapshot = copy.deepcopy(net.state_dict())
+
+    monkeypatch.setattr(
+        loop_module,
+        "evaluate_vs_heuristic",
+        lambda *a, **k: HeuristicEvalResult(games_played=1, win_rate=0.2, avg_rank=0.0, avg_points=0.0),
+    )
+    config_reject = _tiny_config(
+        iterations=2, eval_every=1, gate_on_eval=True, gate_initial_best_win_rate=0.7,
+        network_kwargs={"trunk_dim": 8, "num_residual_blocks": 1},
+    )
+    with MetricsLogger(tmp_path / "logs2") as metrics:
+        run_training_loop(config_reject, metrics, net=net, optimizer=optimizer, start_state=LoopState(iteration=1, total_train_steps=1))
+
+    for key, accepted_tensor in accepted_snapshot.items():
+        assert torch.equal(net.state_dict()[key], accepted_tensor)
+
+
+def test_run_training_loop_gate_tolerance_accepts_a_small_regression(tmp_path, monkeypatch):
+    win_rates = iter([0.7, 0.65])  # within gate_tolerance=0.1 of the 0.7 floor
+    monkeypatch.setattr(
+        loop_module,
+        "evaluate_vs_heuristic",
+        lambda *a, **k: HeuristicEvalResult(games_played=1, win_rate=next(win_rates), avg_rank=0.0, avg_points=0.0),
+    )
+    config = _tiny_config(iterations=2, eval_every=1, gate_on_eval=True, gate_tolerance=0.1)
+
+    with MetricsLogger(tmp_path / "logs") as metrics:
+        run_training_loop(config, metrics)
+
+    lines = [json.loads(line) for line in (tmp_path / "logs" / "metrics.jsonl").read_text().splitlines()]
+    gate_records = [line for line in lines if "eval/gate_accepted" in line]
+    assert [r["eval/gate_accepted"] for r in gate_records] == [1.0, 1.0]
+
+
+def test_run_training_loop_gate_initial_best_win_rate_protects_a_known_floor(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        loop_module,
+        "evaluate_vs_heuristic",
+        lambda *a, **k: HeuristicEvalResult(games_played=1, win_rate=0.5, avg_rank=0.0, avg_points=0.0),
+    )
+    config = _tiny_config(iterations=1, eval_every=1, gate_on_eval=True, gate_initial_best_win_rate=0.9)
+
+    with MetricsLogger(tmp_path / "logs") as metrics:
+        run_training_loop(config, metrics)
+
+    lines = [json.loads(line) for line in (tmp_path / "logs" / "metrics.jsonl").read_text().splitlines()]
+    gate_record = next(line for line in lines if "eval/gate_accepted" in line)
+    assert gate_record["eval/gate_accepted"] == 0.0
+    assert gate_record["eval/gate_best_win_rate"] == pytest.approx(0.9)
 
 
 # --- run_training_loop: parallel self-play ---------------------------------
@@ -453,7 +591,8 @@ def _dummy_replay_samples(n_act: int, count: int) -> list[ReplaySample]:
     pi = np.zeros(ACTION_SPACE_SIZE, dtype=np.float32)
     pi[: n_act + 1] = 1.0 / (n_act + 1)
     y = np.arange(n_act, dtype=np.int64)
-    return [ReplaySample(state=state, n_act=n_act, pi=pi, y=y) for _ in range(count)]
+    points_y = np.zeros(n_act, dtype=np.float32)
+    return [ReplaySample(state=state, n_act=n_act, pi=pi, y=y, points_y=points_y) for _ in range(count)]
 
 
 def test_run_training_loop_survives_every_game_failing(tmp_path, monkeypatch):

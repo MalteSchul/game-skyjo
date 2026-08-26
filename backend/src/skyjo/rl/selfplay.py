@@ -1,5 +1,5 @@
 """Plays one match to completion under MCTS, recording (state, N_act, pi)
-at every decision and back-filling the true final ranks once it ends.
+at every decision and back-filling the true final ranks and points once it ends.
 
 `round_over` is passed through automatically (same non-decision transition
 `mcts._advance_state` uses), so no replay sample is ever recorded for it.
@@ -17,6 +17,7 @@ distribution over representatives, exactly as before.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
@@ -39,17 +40,22 @@ from skyjo.rl.mcts import (
 )
 
 DEFAULT_MAX_STEPS = 5000
-# A round that runs this long without closing naturally gets force-closed
+# Disabled by default (effectively infinite): rounds/games now run to their
+# natural end, bounded only by DEFAULT_MAX_STEPS above, which raises loudly
+# instead of silently truncating a game. The valves themselves still work -
+# a round that runs this long without closing naturally gets force-closed
 # (rl.domain.engine.force_close_round) instead of letting the whole game
 # error out - see that function's docstring for why a round can legitimately
 # never end on its own (an untrained/low-search policy has no pressure to
-# reveal new information, and Skyjo's rules don't require it to).
-DEFAULT_ROUND_MAX_STEPS = 200
-# After this many rounds close (naturally or forced) without reaching
-# target_score, the game just ends there on whatever total_scores currently
-# stand - a hard ceiling independent of score trends, on top of the softer
-# per-round budget above.
-DEFAULT_MAX_ROUNDS = 10
+# reveal new information, and Skyjo's rules don't require it to). Pass an
+# explicit finite value to a caller below to re-enable it.
+DEFAULT_ROUND_MAX_STEPS = sys.maxsize
+# Disabled by default for the same reason: after this many rounds close
+# (naturally or forced) without reaching target_score, the game would end
+# there on whatever total_scores currently stand - a hard ceiling
+# independent of score trends, on top of the softer per-round budget above.
+# Pass an explicit finite value to a caller below to re-enable it.
+DEFAULT_MAX_ROUNDS = sys.maxsize
 
 
 @dataclass(frozen=True)
@@ -61,6 +67,11 @@ class ReplaySample:
     n_act: int
     pi: np.ndarray = field(compare=False)  # shape (ACTION_SPACE_SIZE,)
     y: np.ndarray = field(compare=False)  # shape (n_act,) int64, final rank per player (0 = best)
+    # shape (n_act,) float32, absolute order: each player's final total_scores
+    # normalized by that match's target_score - see rl.train.TrainingBatch's
+    # points_target for how this becomes a training batch, and
+    # rl.network.AlphaZeroNet.points_head for the auxiliary head it trains.
+    points_y: np.ndarray = field(compare=False)
 
 
 def final_ranks(total_scores: Sequence[int]) -> list[int]:
@@ -74,6 +85,15 @@ def final_ranks(total_scores: Sequence[int]) -> list[int]:
     for rank, player in enumerate(order):
         ranks[player] = rank
     return ranks
+
+
+def final_points(total_scores: Sequence[int], target_score: int) -> np.ndarray:
+    """Each player's final total score normalized by `target_score` - the
+    `ReplaySample.points_y` companion to `final_ranks`'s `y`. `target_score`
+    is at least 1 in practice (see `GameState.target_score`), but guarded the
+    same way `encoding.py`'s own total_scores_norm feature is.
+    """
+    return np.asarray(total_scores, dtype=np.float32) / max(target_score, 1)
 
 
 def generate_episode(
@@ -153,7 +173,10 @@ def generate_episode(
         round_stats_sink.append((round_count, tuple(int(s) for s in state.total_scores)))
 
     y = np.asarray(final_ranks(state.total_scores), dtype=np.int64)
-    return [ReplaySample(state=s, n_act=n_act, pi=pi_vector, y=y) for s, pi_vector in pending]
+    points_y = final_points(state.total_scores, state.target_score)
+    return [
+        ReplaySample(state=s, n_act=n_act, pi=pi_vector, y=y, points_y=points_y) for s, pi_vector in pending
+    ]
 
 
 def generate_episode_vs_bot(
@@ -238,7 +261,10 @@ def generate_episode_vs_bot(
         round_stats_sink.append((round_count, tuple(int(s) for s in state.total_scores)))
 
     y = np.asarray(final_ranks(state.total_scores), dtype=np.int64)
-    return [ReplaySample(state=s, n_act=n_act, pi=pi_vector, y=y) for s, pi_vector in pending]
+    points_y = final_points(state.total_scores, state.target_score)
+    return [
+        ReplaySample(state=s, n_act=n_act, pi=pi_vector, y=y, points_y=points_y) for s, pi_vector in pending
+    ]
 
 
 def generate_episodes_batch(
@@ -359,7 +385,13 @@ def generate_episodes_batch(
     results = []
     for i in range(n):
         y = np.asarray(final_ranks(states[i].total_scores), dtype=np.int64)
-        results.append([ReplaySample(state=s, n_act=n_acts[i], pi=pi_vector, y=y) for s, pi_vector in pending[i]])
+        points_y = final_points(states[i].total_scores, states[i].target_score)
+        results.append(
+            [
+                ReplaySample(state=s, n_act=n_acts[i], pi=pi_vector, y=y, points_y=points_y)
+                for s, pi_vector in pending[i]
+            ]
+        )
         if round_stats_sink is not None:
             round_stats_sink.append((round_counts[i], tuple(int(s) for s in states[i].total_scores)))
     return results
@@ -405,4 +437,7 @@ def generate_bot_episode(
         raise RuntimeError(f"generate_bot_episode: match did not reach game_over within {max_steps} steps")
 
     y = np.asarray(final_ranks(state.total_scores), dtype=np.int64)
-    return [ReplaySample(state=s, n_act=n_act, pi=pi_vector, y=y) for s, pi_vector in pending]
+    points_y = final_points(state.total_scores, state.target_score)
+    return [
+        ReplaySample(state=s, n_act=n_act, pi=pi_vector, y=y, points_y=points_y) for s, pi_vector in pending
+    ]

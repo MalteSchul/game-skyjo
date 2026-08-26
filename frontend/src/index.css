@@ -246,6 +246,11 @@ p {
   letter-spacing: 0.05em;
 }
 
+.field-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .field input {
   font: inherit;
   font-size: 15px;

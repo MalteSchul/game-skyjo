@@ -19,13 +19,14 @@ seat indices - see `evaluator.py`.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
 
 from skyjo.domain.action_equivalence import distinct_actions
-from skyjo.domain.deck import DECK_SIZE
+from skyjo.domain.deck import CARD_COUNTS, DECK_SIZE
 from skyjo.domain.engine import (
     BOARD_SIZE,
     DEFAULT_TARGET_SCORE,
@@ -54,6 +55,15 @@ _ABSENT_VALUE = -1.0
 
 _PHASES = ("initial_flip", "awaiting_draw", "awaiting_placement", "round_over", "game_over")
 
+# Every discarded card and every face-up card (on any board) is public
+# knowledge of exactly which values have been removed from play - Skyjo is a
+# card-counting game, so how many of each value are still unseen (in the
+# stock or face-down somewhere) is directly relevant to whether drawing from
+# stock is worth the risk. `encode_state` only ever computes this from public
+# state (discard/drawn_card/face-up board cards), never from stock's actual
+# contents, so it can't leak hidden information.
+_N_DECK_VALUES = len(CARD_COUNTS)
+
 GLOBAL_FEATURES = (
     2  # discard top: present, normalized value
     + 1  # discard count, normalized
@@ -66,6 +76,7 @@ GLOBAL_FEATURES = (
     + N_MAX_PLAYERS  # total_scores, normalized
     + 1  # target_score, normalized
     + _ACTIVE_COUNT_CLASSES  # N_act, one-hot
+    + _N_DECK_VALUES  # remaining-deck composition, one fraction per card value
 )
 
 INPUT_DIM = N_MAX_PLAYERS * _BOARD_FEATURES + GLOBAL_FEATURES + ACTION_SPACE_SIZE
@@ -73,6 +84,26 @@ INPUT_DIM = N_MAX_PLAYERS * _BOARD_FEATURES + GLOBAL_FEATURES + ACTION_SPACE_SIZ
 
 def _normalize_value(value: int) -> float:
     return (value - _MIN_CARD_VALUE) / (_MAX_CARD_VALUE - _MIN_CARD_VALUE)
+
+
+def _remaining_deck_histogram(state: GameState) -> list[float]:
+    """One fraction per card value in `CARD_COUNTS` order: how much of that
+    value's total count is still unseen (not in the discard pile, not the
+    drawn card, not face-up on any board) - 1.0 means none of it has been
+    seen yet, 0.0 means every copy is already accounted for. Face-down board
+    cards and stock contents are genuinely unknown (to every player, not just
+    the network), so they're correctly excluded from `visible` rather than
+    treated as unseen-with-known-identity.
+    """
+    visible: Counter[int] = Counter(state.discard)
+    if state.drawn_card is not None:
+        visible[state.drawn_card] += 1
+    for board in state.boards:
+        for card in board.cards:
+            if card is not None and card.face_up:
+                visible[card.value] += 1
+
+    return [max(0, total - visible[value]) / total for value, total in CARD_COUNTS]
 
 
 def rotation_perm(current_player: int, n_act: int) -> np.ndarray:
@@ -164,6 +195,8 @@ def encode_state(state: GameState, *, legal_actions: Sequence[Action] | None = N
     active_count_onehot = [0.0] * _ACTIVE_COUNT_CLASSES
     active_count_onehot[n_act - MIN_PLAYERS] = 1.0
     global_features += active_count_onehot
+
+    global_features += _remaining_deck_histogram(state)
 
     features = np.concatenate(
         [board_block.reshape(-1), np.asarray(global_features, dtype=np.float32), mask.astype(np.float32)]

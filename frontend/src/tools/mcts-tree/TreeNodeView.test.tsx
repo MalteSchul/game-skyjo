@@ -28,6 +28,7 @@ const GRANDCHILD: DecisionNode = {
   visit_count: 4,
   value: [0.1, -0.1],
   rank_probs: null,
+  points_pred: null,
   edges: [],
 }
 
@@ -44,6 +45,7 @@ const ROOT: DecisionNode = {
   visit_count: 12,
   value: [0.2, -0.2],
   rank_probs: null,
+  points_pred: null,
   edges: [
     decisionEdge({ action: { type: 'DRAW_STOCK', position: null }, visit_count: 10, child: CHANCE_CHILD }),
     decisionEdge({ action: { type: 'DRAW_DISCARD', position: null }, visit_count: 0, child: null }),

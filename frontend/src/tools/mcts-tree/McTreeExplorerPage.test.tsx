@@ -12,6 +12,7 @@ function decisionRoot(overrides: Partial<DecisionNode> = {}): DecisionNode {
     visit_count: 30,
     value: [0.3, -0.3],
     rank_probs: null,
+    points_pred: null,
     edges: [
       {
         action: { type: 'DRAW_STOCK', position: null },
