@@ -224,6 +224,10 @@ function App() {
             thinkingPlayer={match.thinking_player}
           />
         )}
+        <nav className="dev-tools-nav" aria-label="Developer tools">
+          <a href="/tools/mcts-tree">🌳 Tree Explorer</a>
+          <a href="/tools/game-replay">🎬 Game Replay</a>
+        </nav>
       </header>
 
       <main>

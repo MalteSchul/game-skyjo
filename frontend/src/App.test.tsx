@@ -102,6 +102,14 @@ afterEach(() => {
 })
 
 describe('App', () => {
+  it('links to the developer tools from the header, even before a match starts (happy path)', () => {
+    render(<App />)
+    const nav = screen.getByRole('navigation', { name: 'Developer tools' })
+
+    expect(within(nav).getByRole('link', { name: /Tree Explorer/ })).toHaveAttribute('href', '/tools/mcts-tree')
+    expect(within(nav).getByRole('link', { name: /Game Replay/ })).toHaveAttribute('href', '/tools/game-replay')
+  })
+
   it('creates a match and renders the resulting boards (happy path)', async () => {
     createMatch.mockResolvedValue(INITIAL_FLIP_MATCH)
     render(<App />)

@@ -3,12 +3,18 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
 import McTreeExplorerPage from './tools/mcts-tree/McTreeExplorerPage.tsx'
+import GameReplayPage from './tools/game-replay/GameReplayPage.tsx'
 
-// A path-based route for one developer tool, not a router: nginx.conf and
+// Path-based routes for developer tools, not a router: nginx.conf and
 // Vite's dev server both fall back to index.html for any unmatched path
-// (SPA-style), so this is the only wiring a second "page" needs here.
-const isToolsRoute = window.location.pathname.startsWith('/tools/mcts-tree')
-
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>{isToolsRoute ? <McTreeExplorerPage /> : <App />}</StrictMode>,
+// (SPA-style), so this is the only wiring a second/third "page" needs here.
+const path = window.location.pathname
+const page = path.startsWith('/tools/mcts-tree') ? (
+  <McTreeExplorerPage />
+) : path.startsWith('/tools/game-replay') ? (
+  <GameReplayPage />
+) : (
+  <App />
 )
+
+createRoot(document.getElementById('root')!).render(<StrictMode>{page}</StrictMode>)
