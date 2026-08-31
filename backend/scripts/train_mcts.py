@@ -227,6 +227,15 @@ def main() -> None:
         loaded = load_checkpoint(args.resume, net, optimizer)
         start_state = LoopState(iteration=loaded.iteration, total_train_steps=loaded.total_train_steps)
         print(f"resumed from {args.resume} at iteration {loaded.iteration} ({loaded.total_train_steps} train steps so far)")
+        # optimizer.load_state_dict (inside load_checkpoint) restores the *entire*
+        # saved param_groups, including the old `lr` - so without this, --lr on a
+        # resume is silently overwritten back to whatever rate the checkpoint was
+        # saved with, no matter what's passed on the command line.
+        checkpoint_lr = optimizer.param_groups[0]["lr"]
+        if checkpoint_lr != args.lr:
+            for group in optimizer.param_groups:
+                group["lr"] = args.lr
+            print(f"overriding optimizer lr from checkpoint's {checkpoint_lr} to --lr {args.lr}")
 
     initial_samples = None
     resumed_buffer_path = os.path.join(os.path.dirname(args.resume), "buffer_latest.pkl") if args.resume else None
