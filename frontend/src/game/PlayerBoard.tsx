@@ -3,6 +3,16 @@ import Card from './Card'
 
 export const BOARD_COLUMNS = 4
 
+/** Sum of this board's currently face-up cards - a face-down card's `value`
+ * is always redacted to `null` on the wire (see `CardOut.from_card`), and a
+ * cleared column's slots are `null` outright, so summing every non-null
+ * value already means exactly "known" cards without checking `face_up`
+ * separately. Lets a player track their running visible score without doing
+ * the addition themselves. */
+function visibleTotal(board: BoardOut): number {
+  return board.cards.reduce((sum, card) => sum + (card?.value ?? 0), 0)
+}
+
 interface PlayerBoardProps {
   board: BoardOut
   name: string
@@ -38,6 +48,10 @@ function PlayerBoard({
     <section className={`player-board ${isCurrentPlayer ? 'player-board-active' : ''}`}>
       <h3 className="player-board-name">
         {name}
+        {' '}
+        <span className="visible-total-chip" aria-hidden="true" title="Sum of this player's face-up cards">
+          Σ {visibleTotal(board)}
+        </span>
         {isCurrentPlayer && (
           <>
             {' '}

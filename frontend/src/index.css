@@ -1119,6 +1119,17 @@ kbd {
   font-size: 16px;
 }
 
+.visible-total-chip {
+  display: inline-flex;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--code-bg);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--mono);
+  font-weight: 600;
+}
+
 .turn-chip {
   display: inline-flex;
   padding: 2px 9px;
