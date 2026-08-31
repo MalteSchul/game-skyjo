@@ -26,6 +26,7 @@ describe('NewMatchForm', () => {
       ['human', 'human', 'human', 'human'],
       [null, null, null, null],
       [null, null, null, null],
+      [false, false, false, false],
     )
   })
 
@@ -35,7 +36,15 @@ describe('NewMatchForm', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
 
-    expect(onCreate).toHaveBeenCalledWith(2, undefined, ['', ''], ['human', 'human'], [null, null], [null, null])
+    expect(onCreate).toHaveBeenCalledWith(
+      2,
+      undefined,
+      ['', ''],
+      ['human', 'human'],
+      [null, null],
+      [null, null],
+      [false, false],
+    )
   })
 
   it('lets a seat be set to a random bot and submits the chosen player types (happy path)', () => {
@@ -45,7 +54,15 @@ describe('NewMatchForm', () => {
     fireEvent.change(screen.getByLabelText('Player 2 type'), { target: { value: 'random_bot' } })
     fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
 
-    expect(onCreate).toHaveBeenCalledWith(2, undefined, ['', ''], ['human', 'random_bot'], [null, null], [null, null])
+    expect(onCreate).toHaveBeenCalledWith(
+      2,
+      undefined,
+      ['', ''],
+      ['human', 'random_bot'],
+      [null, null],
+      [null, null],
+      [false, false],
+    )
   })
 
   it('lets a seat be set to a thinking bot and submits the chosen player types (happy path)', () => {
@@ -55,7 +72,15 @@ describe('NewMatchForm', () => {
     fireEvent.change(screen.getByLabelText('Player 2 type'), { target: { value: 'thinking_bot' } })
     fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
 
-    expect(onCreate).toHaveBeenCalledWith(2, undefined, ['', ''], ['human', 'thinking_bot'], [null, null], [null, null])
+    expect(onCreate).toHaveBeenCalledWith(
+      2,
+      undefined,
+      ['', ''],
+      ['human', 'thinking_bot'],
+      [null, null],
+      [null, null],
+      [false, false],
+    )
   })
 
   it('lets a seat be set to an MCTS bot and submits the chosen player types (happy path)', () => {
@@ -65,7 +90,15 @@ describe('NewMatchForm', () => {
     fireEvent.change(screen.getByLabelText('Player 2 type'), { target: { value: 'mcts_bot' } })
     fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
 
-    expect(onCreate).toHaveBeenCalledWith(2, undefined, ['', ''], ['human', 'mcts_bot'], [null, null], [null, null])
+    expect(onCreate).toHaveBeenCalledWith(
+      2,
+      undefined,
+      ['', ''],
+      ['human', 'mcts_bot'],
+      [null, null],
+      [null, null],
+      [false, false],
+    )
   })
 
   it('lets an MCTS bot seat pick a specific model once one is available (happy path)', async () => {
@@ -84,6 +117,7 @@ describe('NewMatchForm', () => {
       ['human', 'mcts_bot'],
       [null, 'strong'],
       [null, null],
+      [false, false],
     )
   })
 
@@ -107,6 +141,7 @@ describe('NewMatchForm', () => {
       ['human', 'mcts_bot'],
       [null, 'uploaded'],
       [null, null],
+      [false, false],
     )
   })
 
@@ -130,14 +165,42 @@ describe('NewMatchForm', () => {
     fireEvent.change(screen.getByLabelText('Player 2 simulations'), { target: { value: '50' } })
     fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
 
-    expect(onCreate).toHaveBeenCalledWith(2, undefined, ['', ''], ['human', 'mcts_bot'], [null, null], [null, 50])
+    expect(onCreate).toHaveBeenCalledWith(
+      2,
+      undefined,
+      ['', ''],
+      ['human', 'mcts_bot'],
+      [null, null],
+      [null, 50],
+      [false, false],
+    )
   })
 
-  it('does not show a model or simulations picker for a non-MCTS seat (bad path)', () => {
+  it('lets an MCTS bot seat enable capped root search (happy path)', () => {
+    const onCreate = vi.fn()
+    render(<NewMatchForm onCreate={onCreate} submitting={false} />)
+
+    fireEvent.change(screen.getByLabelText('Player 2 type'), { target: { value: 'mcts_bot' } })
+    fireEvent.click(screen.getByLabelText('Player 2 capped search (experimental)'))
+    fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
+
+    expect(onCreate).toHaveBeenCalledWith(
+      2,
+      undefined,
+      ['', ''],
+      ['human', 'mcts_bot'],
+      [null, null],
+      [null, null],
+      [false, true],
+    )
+  })
+
+  it('does not show a model, simulations, or capped-search picker for a non-MCTS seat (bad path)', () => {
     render(<NewMatchForm onCreate={vi.fn()} submitting={false} />)
 
     expect(screen.queryByLabelText('Player 1 model')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Player 1 simulations')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Player 1 capped search (experimental)')).not.toBeInTheDocument()
   })
 
   it('preserves already-chosen player types when the player count changes (bad path: no data loss on resize)', () => {
@@ -155,6 +218,7 @@ describe('NewMatchForm', () => {
       ['human', 'random_bot', 'human'],
       [null, null, null],
       [null, null, null],
+      [false, false, false],
     )
   })
 

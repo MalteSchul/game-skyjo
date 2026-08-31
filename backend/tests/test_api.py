@@ -414,6 +414,29 @@ def test_create_match_rejects_a_player_mcts_num_simulations_length_mismatch():
     assert response.status_code == 400
 
 
+def test_create_match_uses_the_given_mcts_cap_root_lead():
+    response = client.post(
+        "/matches",
+        json={
+            "player_count": 2,
+            "player_types": ["mcts_bot", "human"],
+            "player_mcts_num_simulations": [2, None],
+            "player_mcts_cap_root_lead": [True, False],
+        },
+    )
+
+    assert response.status_code == 201
+
+
+def test_create_match_rejects_a_player_mcts_cap_root_lead_length_mismatch():
+    response = client.post(
+        "/matches",
+        json={"player_count": 2, "player_mcts_cap_root_lead": [True]},
+    )
+
+    assert response.status_code == 400
+
+
 def test_an_mcts_bot_seat_auto_plays_its_initial_flip(monkeypatch):
     # Keeps the real AlphaZeroNet -> MCTS -> factory -> API path intact, just
     # with few enough simulations per move to stay fast in CI.
@@ -503,7 +526,9 @@ def test_a_fully_human_match_reports_idle_status():
 def test_response_reports_thinking_status_while_a_slow_bot_is_still_deciding(monkeypatch):
     release = threading.Event()
 
-    def fake_create_bot(player_type, seed=None, mcts_model=None, num_simulations=None):
+    def fake_create_bot(
+        player_type, seed=None, mcts_model=None, num_simulations=None, cap_root_lead=False
+    ):
         return None if player_type == "human" else _SlowBot(release)
 
     monkeypatch.setattr(matches, "create_bot", fake_create_bot)
@@ -526,7 +551,9 @@ def test_response_reports_thinking_status_while_a_slow_bot_is_still_deciding(mon
 def test_polling_get_match_reaches_idle_once_a_slow_bot_finishes_deciding(monkeypatch):
     release = threading.Event()
 
-    def fake_create_bot(player_type, seed=None, mcts_model=None, num_simulations=None):
+    def fake_create_bot(
+        player_type, seed=None, mcts_model=None, num_simulations=None, cap_root_lead=False
+    ):
         return None if player_type == "human" else _SlowBot(release)
 
     monkeypatch.setattr(matches, "create_bot", fake_create_bot)
@@ -546,7 +573,9 @@ def test_polling_get_match_reaches_idle_once_a_slow_bot_finishes_deciding(monkey
 def test_actions_endpoint_returns_409_while_a_slow_bot_is_still_deciding(monkeypatch):
     release = threading.Event()
 
-    def fake_create_bot(player_type, seed=None, mcts_model=None, num_simulations=None):
+    def fake_create_bot(
+        player_type, seed=None, mcts_model=None, num_simulations=None, cap_root_lead=False
+    ):
         return None if player_type == "human" else _SlowBot(release)
 
     monkeypatch.setattr(matches, "create_bot", fake_create_bot)
@@ -566,7 +595,9 @@ def test_actions_endpoint_returns_409_while_a_slow_bot_is_still_deciding(monkeyp
 def test_goto_returns_409_while_a_slow_bot_is_still_deciding(monkeypatch):
     release = threading.Event()
 
-    def fake_create_bot(player_type, seed=None, mcts_model=None, num_simulations=None):
+    def fake_create_bot(
+        player_type, seed=None, mcts_model=None, num_simulations=None, cap_root_lead=False
+    ):
         return None if player_type == "human" else _SlowBot(release)
 
     monkeypatch.setattr(matches, "create_bot", fake_create_bot)

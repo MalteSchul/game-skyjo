@@ -127,6 +127,7 @@ function App() {
     playerTypes: PlayerTypeName[],
     playerMctsModels: (string | null)[],
     playerMctsNumSimulations: (number | null)[],
+    playerMctsCapRootLead: boolean[],
   ) {
     setBusy(true)
     setError(null)
@@ -138,6 +139,7 @@ function App() {
         player_types: playerTypes,
         player_mcts_models: playerMctsModels,
         player_mcts_num_simulations: playerMctsNumSimulations,
+        player_mcts_cap_root_lead: playerMctsCapRootLead,
       })
       setMatch(created)
       storeMatchId(created.match_id)

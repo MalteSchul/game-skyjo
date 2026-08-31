@@ -51,6 +51,7 @@ export interface NewMatchRequest {
   player_types?: PlayerTypeName[]
   player_mcts_models?: (string | null)[]
   player_mcts_num_simulations?: (number | null)[]
+  player_mcts_cap_root_lead?: boolean[]
 }
 
 export interface ActionRequest {

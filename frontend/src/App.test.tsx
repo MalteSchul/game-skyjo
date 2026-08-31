@@ -116,6 +116,7 @@ describe('App', () => {
       player_types: ['human', 'human'],
       player_mcts_models: [null, null],
       player_mcts_num_simulations: [null, null],
+      player_mcts_cap_root_lead: [false, false],
     })
   })
 

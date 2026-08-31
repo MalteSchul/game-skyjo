@@ -17,6 +17,7 @@ interface NewMatchFormProps {
     playerTypes: PlayerTypeName[],
     playerMctsModels: (string | null)[],
     playerMctsNumSimulations: (number | null)[],
+    playerMctsCapRootLead: boolean[],
   ) => void
   submitting: boolean
 }
@@ -50,6 +51,13 @@ function resizeMctsNumSimulations(values: (number | null)[], count: number): (nu
   return next
 }
 
+/** Same idea as resizePlayerTypes, but new seats default to false (uncapped search). */
+function resizeMctsCapRootLead(values: boolean[], count: number): boolean[] {
+  const next = values.slice(0, count)
+  while (next.length < count) next.push(false)
+  return next
+}
+
 function clampPlayerCount(value: number): number {
   if (Number.isNaN(value)) return MIN_PLAYERS
   return Math.min(MAX_PLAYERS, Math.max(MIN_PLAYERS, Math.trunc(value)))
@@ -65,6 +73,7 @@ function NewMatchForm({ onCreate, submitting }: NewMatchFormProps) {
   const [playerTypes, setPlayerTypes] = useState<PlayerTypeName[]>(['human', 'human'])
   const [mctsModels, setMctsModels] = useState<(string | null)[]>([null, null])
   const [mctsNumSimulations, setMctsNumSimulations] = useState<(number | null)[]>([null, null])
+  const [mctsCapRootLead, setMctsCapRootLead] = useState<boolean[]>([false, false])
   const [availableMctsModels, setAvailableMctsModels] = useState<string[]>([])
   // Seat index currently uploading a model file, or null - drives the "uploading…" state.
   const [uploadingSeat, setUploadingSeat] = useState<number | null>(null)
@@ -95,6 +104,7 @@ function NewMatchForm({ onCreate, submitting }: NewMatchFormProps) {
     setPlayerTypes((prev) => resizePlayerTypes(prev, count))
     setMctsModels((prev) => resizeMctsModels(prev, count))
     setMctsNumSimulations((prev) => resizeMctsNumSimulations(prev, count))
+    setMctsCapRootLead((prev) => resizeMctsCapRootLead(prev, count))
   }
 
   function handlePlayerCountBlur() {
@@ -104,6 +114,7 @@ function NewMatchForm({ onCreate, submitting }: NewMatchFormProps) {
     setPlayerTypes((prev) => resizePlayerTypes(prev, count))
     setMctsModels((prev) => resizeMctsModels(prev, count))
     setMctsNumSimulations((prev) => resizeMctsNumSimulations(prev, count))
+    setMctsCapRootLead((prev) => resizeMctsCapRootLead(prev, count))
   }
 
   function handleNameChange(index: number, value: string) {
@@ -137,6 +148,10 @@ function NewMatchForm({ onCreate, submitting }: NewMatchFormProps) {
     setMctsNumSimulations((prev) => prev.map((sims, i) => (i === index ? value : sims)))
   }
 
+  function handleMctsCapRootLeadChange(index: number, value: boolean) {
+    setMctsCapRootLead((prev) => prev.map((capped, i) => (i === index ? value : capped)))
+  }
+
   function handleSubmit(event: React.FormEvent) {
     event.preventDefault()
     const playerCount = clampPlayerCount(Number(playerCountInput))
@@ -149,6 +164,7 @@ function NewMatchForm({ onCreate, submitting }: NewMatchFormProps) {
       resizePlayerTypes(playerTypes, playerCount),
       resizeMctsModels(mctsModels, playerCount),
       resizeMctsNumSimulations(mctsNumSimulations, playerCount),
+      resizeMctsCapRootLead(mctsCapRootLead, playerCount),
     )
   }
 
@@ -252,6 +268,19 @@ function NewMatchForm({ onCreate, submitting }: NewMatchFormProps) {
                       const raw = event.target.value
                       handleMctsNumSimulationsChange(i, raw.trim() === '' ? null : Number(raw))
                     }}
+                  />
+                </label>
+              )}
+              {playerTypes[i] === 'mcts_bot' && (
+                <label
+                  className="field player-mcts-cap-root-lead-field"
+                  title="Once one move is clearly ahead, spend remaining search checking the runner-up instead of piling more visits onto the leader."
+                >
+                  <span className="field-label">Player {i + 1} capped search (experimental)</span>
+                  <input
+                    type="checkbox"
+                    checked={mctsCapRootLead[i]}
+                    onChange={(event) => handleMctsCapRootLeadChange(i, event.target.checked)}
                   />
                 </label>
               )}

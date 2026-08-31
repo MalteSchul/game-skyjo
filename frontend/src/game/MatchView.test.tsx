@@ -51,7 +51,15 @@ describe('MatchView', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
 
-    expect(onCreate).toHaveBeenCalledWith(2, undefined, ['', ''], ['human', 'human'], [null, null], [null, null])
+    expect(onCreate).toHaveBeenCalledWith(
+      2,
+      undefined,
+      ['', ''],
+      ['human', 'human'],
+      [null, null],
+      [null, null],
+      [false, false],
+    )
   })
 
   it('calls onCardClick with the player index and position for a clickable board card (happy path)', () => {

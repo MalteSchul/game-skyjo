@@ -77,6 +77,9 @@ def create_match(request: NewMatchRequest) -> MatchStateOut:
     player_types = _resolve_player_types(request.player_types, request.player_count)
     mcts_models = _resolve_mcts_models(request.player_mcts_models, request.player_count)
     mcts_num_simulations = _resolve_mcts_num_simulations(request.player_mcts_num_simulations, request.player_count)
+    mcts_cap_root_lead = _resolve_mcts_cap_root_lead(
+        request.player_mcts_cap_root_lead, request.player_count
+    )
     try:
         bots = tuple(
             create_bot(
@@ -84,6 +87,7 @@ def create_match(request: NewMatchRequest) -> MatchStateOut:
                 seed=None if request.seed is None else request.seed + i,
                 mcts_model=mcts_models[i],
                 num_simulations=mcts_num_simulations[i],
+                cap_root_lead=mcts_cap_root_lead[i],
             )
             for i, player_type in enumerate(player_types)
         )
@@ -265,6 +269,17 @@ def _resolve_mcts_models(models: list[str | None] | None, player_count: int) -> 
             detail=f"player_mcts_models must have exactly player_count ({player_count}) entries",
         )
     return tuple(models)
+
+
+def _resolve_mcts_cap_root_lead(values: list[bool] | None, player_count: int) -> tuple[bool, ...]:
+    if values is None:
+        return tuple(False for _ in range(player_count))
+    if len(values) != player_count:
+        raise HTTPException(
+            status_code=400,
+            detail=f"player_mcts_cap_root_lead must have exactly player_count ({player_count}) entries",
+        )
+    return tuple(values)
 
 
 # Keeps a misconfigured seat from making a request block indefinitely or

@@ -28,6 +28,7 @@ interface MatchViewProps {
     playerTypes: PlayerTypeName[],
     playerMctsModels: (string | null)[],
     playerMctsNumSimulations: (number | null)[],
+    playerMctsCapRootLead: boolean[],
   ) => void
   onDrawStock: () => void
   onDrawDiscard: () => void

@@ -38,8 +38,9 @@ from __future__ import annotations
 import inspect
 import math
 from collections import Counter
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Callable, Generator, Iterable, Sequence
 from dataclasses import dataclass, field
+from typing import Literal
 
 import numpy as np
 
@@ -225,13 +226,14 @@ def _apply_root_noise(
         edge.prior = (1 - epsilon) * edge.prior + epsilon * eta
 
 
-def _select_edge(node: MCTSNode, c_puct: float) -> MCTSEdge:
-    k = node.state.current_player
-    sqrt_total = math.sqrt(node.visit_count)
-
+def _best_by_puct(edges: Iterable[MCTSEdge], k: int, sqrt_total: float, c_puct: float) -> MCTSEdge:
+    """Core PUCT scoring loop, factored out of `_select_edge` so
+    `_select_root_edge_capped` can reuse the identical `q + u` formula over a
+    *filtered* subset of a node's edges instead of duplicating it.
+    """
     best_edge: MCTSEdge | None = None
     best_score = -math.inf
-    for edge in node.edges.values():
+    for edge in edges:
         q = edge.mean_value()[k]
         u = c_puct * edge.prior * sqrt_total / (1 + edge.visit_count)
         score = q + u
@@ -239,10 +241,44 @@ def _select_edge(node: MCTSNode, c_puct: float) -> MCTSEdge:
             best_score = score
             best_edge = edge
 
-    assert best_edge is not None, (
-        "_select_edge: node has no edges - should never be called on a leaf"
-    )
+    assert best_edge is not None, "_best_by_puct: edges is empty - should never be called with none"
     return best_edge
+
+
+def _select_edge(node: MCTSNode, c_puct: float) -> MCTSEdge:
+    return _best_by_puct(
+        node.edges.values(), node.state.current_player, math.sqrt(node.visit_count), c_puct
+    )
+
+
+def _select_root_edge_capped(node: MCTSNode, c_puct: float) -> MCTSEdge:
+    """Root-only alternative to `_select_edge`, for live/eval decision-making
+    rather than self-play: caps how far the most-visited root edge can pull
+    ahead of the second-most-visited one. Once a single edge is a clear
+    leader (2+ visits ahead), a further visit into it can't change the
+    eventual argmax-visits decision - it's spent instead checking whether the
+    runner-up could still catch up. Below the root, `_select_edge` stays
+    unchanged: only the root's final choice is a best-arm problem, deeper
+    nodes still need their own Q built the normal way.
+
+    A tie for the lead (two or more edges sharing the max visit count) never
+    triggers exclusion - only a single undisputed leader does, so an
+    undecided race is left entirely to ordinary PUCT.
+    """
+    edges = list(node.edges.values())
+    if len(edges) == 1:
+        return edges[0]
+
+    k = node.state.current_player
+    sqrt_total = math.sqrt(node.visit_count)
+    visit_counts = sorted((edge.visit_count for edge in edges), reverse=True)
+    max_visits, second_max_visits = visit_counts[0], visit_counts[1]
+
+    if max_visits - 1 > second_max_visits:
+        leader = next(edge for edge in edges if edge.visit_count == max_visits)
+        edges = [edge for edge in edges if edge is not leader]
+
+    return _best_by_puct(edges, k, sqrt_total, c_puct)
 
 
 def _leaf_node(
@@ -346,7 +382,7 @@ def _advance_round_closing(state: GameState, action: Action, rng: np.random.Gene
 
 
 def _simulate_once_gen(
-    root: MCTSNode, c_puct: float, rng: np.random.Generator
+    root: MCTSNode, c_puct: float, rng: np.random.Generator, *, cap_root_lead: bool = False
 ) -> Generator[GameState, LeafResult, None]:
     """Generator form of one simulation: walks the tree exactly as before,
     pausing at `yield` only where the walk reaches a leaf that genuinely
@@ -355,12 +391,19 @@ def _simulate_once_gen(
     both drive this same walk - one leaf at a time, or many trees' leaves
     batched together - so the tree-walk logic lives in exactly one place
     regardless of which driver is used.
+
+    `cap_root_lead`, if set, swaps in `_select_root_edge_capped` for the
+    root's own edge choice only (see that function) - every other node in
+    the walk still selects via plain `_select_edge`.
     """
     path: list[MCTSEdge | ChanceEdge] = []
     node = root
 
     while True:
-        edge = _select_edge(node, c_puct)
+        if node is root and cap_root_lead:
+            edge = _select_root_edge_capped(node, c_puct)
+        else:
+            edge = _select_edge(node, c_puct)
         path.append(edge)
         state = node.state
 
@@ -427,8 +470,13 @@ def _simulate_once(
     rng: np.random.Generator,
     *,
     supports_turn: bool,
+    cap_root_lead: bool = False,
 ) -> None:
-    _drive_gen(_simulate_once_gen(root, c_puct, rng), evaluate, supports_turn=supports_turn)
+    _drive_gen(
+        _simulate_once_gen(root, c_puct, rng, cap_root_lead=cap_root_lead),
+        evaluate,
+        supports_turn=supports_turn,
+    )
 
 
 def run_mcts(
@@ -444,6 +492,7 @@ def run_mcts(
     on_simulation: Callable[[int], None] | None = None,
     on_root_ready: Callable[[MCTSNode], None] | None = None,
     reuse_root: MCTSNode | None = None,
+    cap_root_lead: bool = False,
 ) -> MCTSNode:
     """`on_root_ready`, if given, fires exactly once - after the root is
     expanded and root noise applied, before the first simulation - with the
@@ -451,6 +500,12 @@ def run_mcts(
     return. It exists so a caller can snapshot the tree mid-search (e.g. via
     `on_simulation`) without waiting for `run_mcts` to return: the object it
     receives *is* the live root, not a copy.
+
+    `cap_root_lead`, default off, swaps the root's own edge selection to
+    `_select_root_edge_capped` (see that function) for live/eval
+    decision-making instead of plain PUCT - intended for callers that read
+    the final answer off `greedy_action` rather than self-play's tau-sampled
+    training targets. Every node below the root is unaffected either way.
 
     `reuse_root`, if given, must already be an expanded `MCTSNode` whose own
     `.state` is exactly `gamestate_from_turn(root_turn)` - e.g. a child pulled
@@ -492,7 +547,9 @@ def run_mcts(
         on_root_ready(root)
 
     for i in range(num_simulations):
-        _simulate_once(root, evaluate, c_puct, rng, supports_turn=supports_turn)
+        _simulate_once(
+            root, evaluate, c_puct, rng, supports_turn=supports_turn, cap_root_lead=cap_root_lead
+        )
         if on_simulation is not None:
             on_simulation(i + 1)
 
@@ -509,6 +566,7 @@ def run_mcts_batch(
     dirichlet_epsilon: float = DEFAULT_DIRICHLET_EPSILON,
     add_root_noise: bool = True,
     rngs: Sequence[np.random.Generator] | None = None,
+    cap_root_lead: bool = False,
 ) -> list[MCTSNode]:
     """Runs `len(root_turns)` independent searches side by side - one root
     per turn - batching every round's leaf evaluations into a single
@@ -551,7 +609,10 @@ def run_mcts_batch(
             _apply_root_noise(root, dirichlet_alpha, dirichlet_epsilon, rng)
 
     for _ in range(num_simulations):
-        gens = [_simulate_once_gen(root, c_puct, rng) for root, rng in zip(roots, rngs, strict=True)]
+        gens = [
+            _simulate_once_gen(root, c_puct, rng, cap_root_lead=cap_root_lead)
+            for root, rng in zip(roots, rngs, strict=True)
+        ]
         pending_indices: list[int] = []
         pending_states: list[GameState] = []
         pending_turns: list[Turn] = []
@@ -606,23 +667,36 @@ def sample_action(pi: dict[Action, float], rng: np.random.Generator) -> Action:
     return actions[index]
 
 
-def greedy_action(root: MCTSNode, rng: np.random.Generator) -> Action:
+def greedy_action(
+    root: MCTSNode, rng: np.random.Generator, *, tie_break: Literal["random", "value"] = "random"
+) -> Action:
     """Most-visited root action - the search's actual best line, for a live
     bot/eval opponent rather than self-play's tau-sampled training targets.
 
     Ties (common against an uninformative/untrained evaluator, e.g. every
-    edge visited once) are broken randomly rather than always taking the
-    same "first" edge: a deterministic tie-break can lock two such players
-    into repeating the same tied pair of actions forever (e.g.
+    edge visited once) are broken randomly by default rather than always
+    taking the same "first" edge: a deterministic tie-break can lock two such
+    players into repeating the same tied pair of actions forever (e.g.
     draw-then-discard, never placing) since nothing about the state that
     matters to the tie ever changes turn to turn.
+
+    `tie_break="value"` instead breaks ties by highest `mean_value()` for the
+    acting player - the hedge for `run_mcts(..., cap_root_lead=True)`, whose
+    whole point is deliberately compressing visit-count gaps at the root, so
+    ties there are more likely and, unlike the uninformative-evaluator case
+    above, an actual value estimate is worth trusting over a coin flip.
     """
     if not root.edges:
         raise ValueError("greedy_action: root has no legal actions (terminal or unexpanded)")
     visits = {action: edge.visit_count for action, edge in root.edges.items()}
     max_visits = max(visits.values())
     best_actions = [action for action, count in visits.items() if count == max_visits]
-    return best_actions[0] if len(best_actions) == 1 else best_actions[rng.integers(len(best_actions))]
+    if len(best_actions) == 1:
+        return best_actions[0]
+    if tie_break == "value":
+        k = root.state.current_player
+        return max(best_actions, key=lambda action: root.edges[action].mean_value()[k])
+    return best_actions[rng.integers(len(best_actions))]
 
 
 def infer_revealed_value(turn_before: Turn, action: Action, turn_after: Turn) -> int | None:

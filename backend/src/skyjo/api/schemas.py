@@ -58,6 +58,12 @@ class NewMatchRequest(BaseModel):
     # player_type isn't "mcts_bot". Omitted defaults every seat to None — see
     # api.matches._resolve_mcts_num_simulations.
     player_mcts_num_simulations: list[int | None] | None = None
+    # One entry per player, in seat order - whether that seat's mcts_bot
+    # caps how far its search's leading move can pull ahead in visits (see
+    # rl.mcts.run_mcts's cap_root_lead). Ignored for seats whose player_type
+    # isn't "mcts_bot". Omitted defaults every seat to False - see
+    # api.matches._resolve_mcts_cap_root_lead.
+    player_mcts_cap_root_lead: list[bool] | None = None
 
 
 class ActionRequest(BaseModel):
