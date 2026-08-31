@@ -238,6 +238,7 @@ def gamestate_from_turn(turn: Turn) -> GameState:
         phase=turn.phase,
         reshuffle_seed=None,
         target_score=turn.target_score,
+        round_number=turn.round_number,
     )
 
 

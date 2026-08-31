@@ -440,6 +440,36 @@ def test_start_next_round_carries_scores_forward_and_deals_fresh_hands():
     assert next_state.reshuffle_seed == 2
 
 
+def test_start_next_round_hands_the_first_flip_to_the_next_seat():
+    # new_match's round 0 always starts at seat 0 (see
+    # test_initial_flip_alternates_players_and_starter_is_highest_sum) - the
+    # very next round must not repeat that, or seat 0 would always flip
+    # first, round after round, for the whole match.
+    state = _finish_round(
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, -1, -2],
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12],
+    )
+    assert state.round_number == 0
+
+    next_state = start_next_round(state)
+
+    assert next_state.round_number == 1
+    assert next_state.current_player == 1
+
+
+def test_round_starter_rotation_wraps_around_for_any_player_count():
+    board = _board_from_values([0] * BOARD_SIZE, face_up=True)
+    state = _state((board, board, board), phase="round_over", total_scores=(0, 0, 0))
+
+    # Round 2 (0-indexed) is the last seat for 3 players; round 3 must wrap
+    # back to seat 0 rather than indexing past the end.
+    round_2 = start_next_round(replace(state, round_number=1))
+    assert round_2.current_player == 2
+
+    round_3 = start_next_round(replace(state, round_number=2))
+    assert round_3.current_player == 0
+
+
 # --- stock exhaustion / reshuffle --------------------------------------------
 
 

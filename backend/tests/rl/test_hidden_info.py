@@ -359,3 +359,24 @@ def test_gamestate_from_turn_never_carries_a_real_hidden_value():
             if not card.face_up:
                 assert card.value == HIDDEN_SENTINEL
     assert set(redacted.stock) <= {HIDDEN_SENTINEL}
+
+
+def test_gamestate_from_turn_preserves_round_number():
+    # round_number isn't hidden info (same category as total_scores), and a
+    # search that crosses a round boundary partway through
+    # (rl.mcts._advance_round_closing calls start_next_round on a state
+    # descended from this reconstruction) picks the next round's starting
+    # seat from it - get this wrong and search simulates the wrong player
+    # flipping first, since a fresh new_match is always round 0 this
+    # specifically starts from a later round, where silently defaulting back
+    # to 0 would show up.
+    state = new_match(player_count=3, seed=5)
+    state = replace(state, round_number=4, total_scores=(10, 20, 30))
+    while state.phase == "initial_flip":
+        state = apply_action(state, legal_actions(state)[0])
+    turn = Turn.from_state(state)
+    assert turn.round_number == 4
+
+    redacted = gamestate_from_turn(turn)
+
+    assert redacted.round_number == 4
