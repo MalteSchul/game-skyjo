@@ -230,6 +230,7 @@ def gamestate_from_turn(turn: Turn) -> GameState:
         discard=turn.discard,
         current_player=turn.acting_player,
         drawn_card=turn.drawn_card,
+        drawn_card_source=turn.drawn_card_source,
         finisher=turn.finisher,
         players_awaiting_final_turn=turn.players_awaiting_final_turn,
         round_scores=None,

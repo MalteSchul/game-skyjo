@@ -161,6 +161,22 @@ def _parse_args() -> argparse.Namespace:
         help="MCTS simulations per move during heuristic-eval - deliberately smaller than "
         "--num-simulations, a cheap diagnostic rather than a rigorous benchmark",
     )
+    parser.add_argument(
+        "--eval-workers",
+        type=int,
+        default=0,
+        help="0 (default) = serial, in-process eval. >0 spreads --eval-games across a process pool "
+        "of this size - the eval-time counterpart to --workers, worth setting explicitly once "
+        "--eval-games is large enough that serial eval would dominate wall time.",
+    )
+    parser.add_argument(
+        "--eval-batch-size",
+        type=int,
+        default=1,
+        help="1 (default) = one game's leaf evaluated per network call during eval. >1 batches that "
+        "many games' concurrent leaf evaluations into one call - the eval-time counterpart to "
+        "--selfplay-batch-size.",
+    )
     return parser.parse_args()
 
 
@@ -216,6 +232,8 @@ def main() -> None:
         eval_every=args.eval_every,
         eval_games=args.eval_games,
         eval_num_simulations=args.eval_num_simulations,
+        eval_workers=args.eval_workers,
+        eval_batch_size=args.eval_batch_size,
     )
     print(f"self-play concurrency: workers={workers} selfplay_batch_size={selfplay_batch_size}")
 
@@ -227,6 +245,15 @@ def main() -> None:
         loaded = load_checkpoint(args.resume, net, optimizer)
         start_state = LoopState(iteration=loaded.iteration, total_train_steps=loaded.total_train_steps)
         print(f"resumed from {args.resume} at iteration {loaded.iteration} ({loaded.total_train_steps} train steps so far)")
+        # optimizer.load_state_dict (inside load_checkpoint) restores the *entire*
+        # saved param_groups, including the old `lr` - so without this, --lr on a
+        # resume is silently overwritten back to whatever rate the checkpoint was
+        # saved with, no matter what's passed on the command line.
+        checkpoint_lr = optimizer.param_groups[0]["lr"]
+        if checkpoint_lr != args.lr:
+            for group in optimizer.param_groups:
+                group["lr"] = args.lr
+            print(f"overriding optimizer lr from checkpoint's {checkpoint_lr} to --lr {args.lr}")
 
     initial_samples = None
     resumed_buffer_path = os.path.join(os.path.dirname(args.resume), "buffer_latest.pkl") if args.resume else None

@@ -71,6 +71,14 @@ class GameState:
     # mid-round discard-into-stock reshuffles). None means "unseeded match".
     reshuffle_seed: int | None
     target_score: int = DEFAULT_TARGET_SCORE
+    # Where drawn_card came from - None whenever drawn_card is None. A card
+    # drawn from the discard pile is a known, chosen value (unlike a blind
+    # stock draw), which is what makes it possible to game: repeatedly
+    # swapping it onto a same-or-worse-valued face-up card never actually
+    # improves the board, just cycles cards through the discard pile. See
+    # legal_actions()'s awaiting_placement branch for the restriction this
+    # enables.
+    drawn_card_source: Literal["stock", "discard"] | None = None
 
 
 def new_match(player_count: int, seed: int | None = None) -> GameState:
@@ -117,7 +125,21 @@ def legal_actions(state: GameState) -> list[Action]:
     for i, card in enumerate(board.cards):
         if card is None:
             continue
-        actions.append(Action(ActionType.PLACE, position=i))
+        # A discard-sourced card (a known, chosen value, unlike a blind stock
+        # draw) can't be swapped onto a face-up card that's already at least
+        # as good - that swap never actually improves the board, just cycles
+        # cards through the discard pile forever. Exempted when it completes
+        # the column instead: the target slot's own prior value doesn't
+        # matter to whether a clear happens, so this restriction shouldn't
+        # block a clear just because of what happened to be sitting there.
+        blocked = (
+            state.drawn_card_source == "discard"
+            and card.face_up
+            and card.value <= state.drawn_card
+            and not _would_clear_column(board, i, state.drawn_card)
+        )
+        if not blocked:
+            actions.append(Action(ActionType.PLACE, position=i))
         if not card.face_up:
             actions.append(Action(ActionType.DISCARD_AND_REVEAL, position=i))
     return actions
@@ -219,6 +241,7 @@ def _apply_draw_stock(state: GameState) -> GameState:
         stock=stock,
         discard=discard,
         drawn_card=drawn,
+        drawn_card_source="stock",
         phase="awaiting_placement",
         reshuffle_seed=reshuffle_seed,
     )
@@ -235,7 +258,9 @@ def _reshuffle(
 
 def _apply_draw_discard(state: GameState) -> GameState:
     drawn, discard = state.discard[-1], state.discard[:-1]
-    return replace(state, discard=discard, drawn_card=drawn, phase="awaiting_placement")
+    return replace(
+        state, discard=discard, drawn_card=drawn, drawn_card_source="discard", phase="awaiting_placement"
+    )
 
 
 def _apply_place(state: GameState, position: int) -> GameState:
@@ -245,7 +270,9 @@ def _apply_place(state: GameState, position: int) -> GameState:
     new_board, cleared = _clear_completed_columns(replace(board, cards=new_cards), position)
     boards = _with_index(state.boards, state.current_player, new_board)
     discard = state.discard + (old_card.value,) + cleared
-    return _finish_turn(replace(state, boards=boards, discard=discard, drawn_card=None))
+    return _finish_turn(
+        replace(state, boards=boards, discard=discard, drawn_card=None, drawn_card_source=None)
+    )
 
 
 def _apply_discard_and_reveal(state: GameState, position: int) -> GameState:
@@ -256,21 +283,40 @@ def _apply_discard_and_reveal(state: GameState, position: int) -> GameState:
     )
     boards = _with_index(state.boards, state.current_player, new_board)
     discard = state.discard + (state.drawn_card,) + cleared
-    return _finish_turn(replace(state, boards=boards, discard=discard, drawn_card=None))
+    return _finish_turn(
+        replace(state, boards=boards, discard=discard, drawn_card=None, drawn_card_source=None)
+    )
+
+
+def _column_positions(position: int) -> tuple[int, int, int]:
+    col = position % COLUMNS
+    return (col, col + COLUMNS, col + 2 * COLUMNS)
+
+
+def _would_clear_column(board: PlayerBoard, position: int, new_value: int) -> bool:
+    """Whether placing `new_value` at `position` - whatever is there now -
+    would complete that column: the *other* two slots already face-up with
+    that same value. Doesn't need to know what's currently at `position`
+    itself, since placing always overwrites it. Shared by
+    `_clear_completed_columns` (checking the value just placed) and
+    `legal_actions` (checking a candidate placement before it happens)."""
+    others = [p for p in _column_positions(position) if p != position]
+    return all(
+        board.cards[p] is not None and board.cards[p].face_up and board.cards[p].value == new_value
+        for p in others
+    )
 
 
 def _clear_completed_columns(board: PlayerBoard, position: int) -> tuple[PlayerBoard, tuple[int, ...]]:
     # A cleared column is discarded, not removed from the game: the three matching
     # cards go on top of the discard pile, same as any other discarded card, and can
     # later be reshuffled back into the stock. See _apply_place / _apply_discard_and_reveal.
-    col = position % COLUMNS
-    positions = (col, col + COLUMNS, col + 2 * COLUMNS)
-    cards = [board.cards[p] for p in positions]
-    if all(c is not None and c.face_up for c in cards) and len({c.value for c in cards}) == 1:
+    target = board.cards[position]
+    if target is not None and target.face_up and _would_clear_column(board, position, target.value):
         updated = list(board.cards)
-        for p in positions:
+        for p in _column_positions(position):
             updated[p] = None
-        return replace(board, cards=tuple(updated)), tuple(c.value for c in cards)
+        return replace(board, cards=tuple(updated)), (target.value,) * 3
     return board, ()
 
 

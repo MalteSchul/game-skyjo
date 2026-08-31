@@ -102,6 +102,14 @@ afterEach(() => {
 })
 
 describe('App', () => {
+  it('links to the developer tools from the header, even before a match starts (happy path)', () => {
+    render(<App />)
+    const nav = screen.getByRole('navigation', { name: 'Developer tools' })
+
+    expect(within(nav).getByRole('link', { name: /Tree Explorer/ })).toHaveAttribute('href', '/tools/mcts-tree')
+    expect(within(nav).getByRole('link', { name: /Game Replay/ })).toHaveAttribute('href', '/tools/game-replay')
+  })
+
   it('creates a match and renders the resulting boards (happy path)', async () => {
     createMatch.mockResolvedValue(INITIAL_FLIP_MATCH)
     render(<App />)
@@ -116,6 +124,7 @@ describe('App', () => {
       player_types: ['human', 'human'],
       player_mcts_models: [null, null],
       player_mcts_num_simulations: [null, null],
+      player_mcts_cap_root_lead: [false, false],
     })
   })
 
@@ -327,6 +336,32 @@ describe('App', () => {
       // running anyway; it shouldn't, since status was already 'idle'.
       await new Promise((resolve) => setTimeout(resolve, 50))
       expect(getMatch).not.toHaveBeenCalled()
+    })
+
+    it('refreshes history on every poll tick, not just once thinking ends (happy path: bot-vs-bot autoplay)', async () => {
+      // With two bot seats and no human to hand control back to, the backend
+      // plays out several moves in a row under one continuous "thinking"
+      // session (see App.tsx's poll-effect comment) - the board (getMatch)
+      // advances move by move while status stays 'thinking' the whole time.
+      // History must keep pace with it instead of waiting for status to
+      // become 'idle'.
+      createMatch.mockResolvedValue({
+        ...INITIAL_FLIP_MATCH,
+        status: 'thinking',
+        thinking_player: 0,
+        thinking_progress: null,
+      })
+      getMatch
+        .mockResolvedValueOnce({ ...INITIAL_FLIP_MATCH, status: 'thinking', thinking_player: 1 })
+        .mockResolvedValueOnce({ ...INITIAL_FLIP_MATCH, status: 'idle' })
+      render(<App />)
+
+      fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
+      await screen.findByText('Player 1 is thinking…')
+
+      // One refresh from match creation, plus one per poll tick below.
+      await waitFor(() => expect(getMatch).toHaveBeenCalledTimes(2), { timeout: 3000 })
+      await waitFor(() => expect(getMatchHistory).toHaveBeenCalledTimes(3), { timeout: 3000 })
     })
 
     it('keeps polling after a transient poll failure instead of giving up (bad path)', async () => {

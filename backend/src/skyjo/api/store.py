@@ -247,6 +247,22 @@ class MatchStore:
             self._require_idle(tree)
             return self._advance(tree, Edge(kind="next_round"), compute_state)
 
+    def autoplay_start_next_round(
+        self, match_id: str, compute_state
+    ) -> tuple[MatchNode, tuple[str, ...], tuple[str, ...]]:
+        """Like `start_next_round`, but for use only from within the match's
+        own autoplay thread - see `apply_autoplay_action`. Lets an all-bot
+        match carry itself past a round boundary without a human clicking
+        "Start next round"."""
+        with self._lock:
+            tree = self._tree(match_id)
+            return self._advance(tree, Edge(kind="next_round"), compute_state)
+
+    def all_seats_are_bots(self, match_id: str) -> bool:
+        with self._lock:
+            tree = self._tree(match_id)
+            return all(bot is not None for bot in tree.bots)
+
     def goto(self, match_id: str, node_id: str) -> tuple[MatchNode, tuple[str, ...], tuple[str, ...]]:
         with self._lock:
             tree = self._tree(match_id)

@@ -24,7 +24,11 @@ RankProbsByState = Mapping[GameState, np.ndarray]
 PointsPredByState = Mapping[GameState, np.ndarray]
 
 
-def _action_to_dict(action: Action) -> dict[str, Any]:
+def action_to_dict(action: Action) -> dict[str, Any]:
+    """`{"type": <ActionType name>, "position": ...}` - the action shape this
+    module's JSON uses everywhere, and shared by `game_record_export` so both
+    exporters (and the one frontend `actionLabel()` helper that reads them)
+    agree on it."""
     return {"type": action.type.name, "position": action.position}
 
 
@@ -93,7 +97,7 @@ def _mcts_edge_to_dict(
     q = edge.mean_value()[current_player]
     u = c_puct * edge.prior * math.sqrt(parent_visit_count) / (1 + edge.visit_count)
     return {
-        "action": _action_to_dict(edge.action),
+        "action": action_to_dict(edge.action),
         "prior": edge.prior,
         "prior_before_noise": edge.prior_before_noise,
         "visit_count": edge.visit_count,

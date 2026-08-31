@@ -24,10 +24,12 @@ def create_bot(
     seed: int | None = None,
     mcts_model: str | None = None,
     num_simulations: int | None = None,
+    cap_root_lead: bool = False,
 ) -> Bot | None:
     """Returns None for "human" - no bot controls that seat. `mcts_model` (a
-    name from `mcts_bot.list_available_models`) and `num_simulations` only
-    apply to "mcts_bot" - both are ignored for every other player_type."""
+    name from `mcts_bot.list_available_models`), `num_simulations`, and
+    `cap_root_lead` only apply to "mcts_bot" - all are ignored for every
+    other player_type."""
     if player_type == "human":
         return None
     if player_type == "random_bot":
@@ -39,5 +41,7 @@ def create_bot(
     if player_type == "mcts_bot":
         evaluate = evaluator_for_model(mcts_model) if mcts_model is not None else default_evaluator()
         sims = num_simulations if num_simulations is not None else default_num_simulations()
-        return MctsBot(evaluate=evaluate, num_simulations=sims, seed=seed)
+        return MctsBot(
+            evaluate=evaluate, num_simulations=sims, seed=seed, cap_root_lead=cap_root_lead
+        )
     raise ValueError(f"create_bot: unknown player_type {player_type!r}")

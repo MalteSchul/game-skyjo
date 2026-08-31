@@ -23,6 +23,7 @@ from skyjo.rl.mcts import (
     MCTSNode,
     _accepts_keyword,
     _select_edge,
+    _select_root_edge_capped,
     _terminal_utility,
     greedy_action,
     run_mcts,
@@ -217,6 +218,125 @@ def test_select_edge_uses_the_node_current_players_q_component_not_always_player
     root_actions = list(root_node.edges)
     assert _select_edge(root_node, c_puct=1.5).action == root_actions[0]
     assert _select_edge(opponent_node, c_puct=1.5).action == root_actions[1]
+
+
+# --- _select_root_edge_capped: eval-only root policy that bounds the leader's lead ---
+
+
+def _two_edge_root(*, leader_visits, other_visits, leader_value, other_value):
+    action_leader = Action(type=ActionType.DRAW_STOCK)
+    action_other = Action(type=ActionType.DRAW_DISCARD)
+    state = replace(new_match(player_count=2, seed=1), current_player=0)
+    root = MCTSNode(state=state, n_act=2, is_terminal=False)
+    root.edges[action_leader] = MCTSEdge(
+        action=action_leader,
+        prior=0.9,
+        n_act=2,
+        visit_count=leader_visits,
+        value_sum=np.array([leader_value * leader_visits, 0.0]),
+    )
+    root.edges[action_other] = MCTSEdge(
+        action=action_other,
+        prior=0.1,
+        n_act=2,
+        visit_count=other_visits,
+        value_sum=np.array([other_value * other_visits, 0.0]),
+    )
+    return root, action_leader, action_other
+
+
+def test_select_root_edge_capped_excludes_a_clear_leader():
+    root, action_leader, action_other = _two_edge_root(
+        leader_visits=5, other_visits=2, leader_value=1.0, other_value=-1.0
+    )
+
+    # Plain PUCT still favors the much-better, much-more-visited leader...
+    assert _select_edge(root, c_puct=1.5).action == action_leader
+    # ...but the capped root policy excludes it once its lead is 2+ visits.
+    assert _select_root_edge_capped(root, c_puct=1.5).action == action_other
+
+
+def test_select_root_edge_capped_does_not_exclude_a_lead_of_only_one_visit():
+    root, action_leader, _ = _two_edge_root(
+        leader_visits=3, other_visits=2, leader_value=1.0, other_value=-1.0
+    )
+
+    assert _select_edge(root, c_puct=1.5).action == action_leader
+    assert _select_root_edge_capped(root, c_puct=1.5).action == action_leader
+
+
+def test_select_root_edge_capped_leaves_a_tied_lead_to_ordinary_puct():
+    root, _action_leader, action_other = _two_edge_root(
+        leader_visits=5, other_visits=5, leader_value=-1.0, other_value=1.0
+    )
+
+    assert _select_edge(root, c_puct=1.5).action == action_other
+    assert _select_root_edge_capped(root, c_puct=1.5).action == action_other
+
+
+def test_select_root_edge_capped_returns_the_only_edge_when_root_has_one_legal_action():
+    action = Action(type=ActionType.DRAW_STOCK)
+    root = MCTSNode(state=new_match(player_count=2, seed=1), n_act=2, is_terminal=False)
+    root.edges[action] = MCTSEdge(
+        action=action, prior=1.0, n_act=2, visit_count=7, value_sum=np.array([7.0, 0.0])
+    )
+
+    assert _select_root_edge_capped(root, c_puct=1.5).action == action
+
+
+def test_run_mcts_with_cap_root_lead_bounds_the_visit_gap_at_the_root():
+    state = new_match(player_count=2, seed=7)
+    while state.phase == "initial_flip":
+        state = apply_action(state, engine_legal_actions(state)[0])
+    turn = Turn.from_state(state)
+    favored = engine_legal_actions(state)[0]
+
+    def evaluate(s):
+        actions = engine_legal_actions(s)
+        priors = {a: (0.9 if a == favored else 0.1 / max(len(actions) - 1, 1)) for a in actions}
+        return priors, np.zeros(len(s.boards))
+
+    def gap(root):
+        counts = sorted((edge.visit_count for edge in root.edges.values()), reverse=True)
+        return counts[0] - counts[1]
+
+    capped = run_mcts(
+        turn, evaluate, num_simulations=200, add_root_noise=False,
+        rng=np.random.default_rng(0), cap_root_lead=True,
+    )
+    uncapped = run_mcts(
+        turn, evaluate, num_simulations=200, add_root_noise=False, rng=np.random.default_rng(0)
+    )
+
+    assert gap(capped) <= 2
+    assert gap(uncapped) > 2
+
+
+def test_run_mcts_batch_respects_cap_root_lead():
+    state = new_match(player_count=2, seed=7)
+    while state.phase == "initial_flip":
+        state = apply_action(state, engine_legal_actions(state)[0])
+    turn = Turn.from_state(state)
+    favored = engine_legal_actions(state)[0]
+
+    def evaluate(s):
+        actions = engine_legal_actions(s)
+        priors = {a: (0.9 if a == favored else 0.1 / max(len(actions) - 1, 1)) for a in actions}
+        return priors, np.zeros(len(s.boards))
+
+    def evaluate_batch(states):
+        return [evaluate(s) for s in states]
+
+    [root] = run_mcts_batch(
+        [turn],
+        evaluate_batch,
+        num_simulations=200,
+        add_root_noise=False,
+        rngs=[np.random.default_rng(0)],
+        cap_root_lead=True,
+    )
+    counts = sorted((edge.visit_count for edge in root.edges.values()), reverse=True)
+    assert counts[0] - counts[1] <= 2
 
 
 # --- terminal utility / final ranks ---------------------------------------------
@@ -800,3 +920,19 @@ def test_greedy_action_raises_on_a_root_with_no_edges():
 
     with pytest.raises(ValueError):
         greedy_action(root, np.random.default_rng(0))
+
+
+def test_greedy_action_tie_break_value_picks_the_higher_q_action_instead_of_randomly():
+    action_a = Action(type=ActionType.DRAW_STOCK)
+    action_b = Action(type=ActionType.DRAW_DISCARD)
+    state = replace(new_match(player_count=2, seed=1), current_player=0)
+    root = MCTSNode(state=state, n_act=2, is_terminal=False)
+    root.edges[action_a] = MCTSEdge(
+        action=action_a, prior=0.5, n_act=2, visit_count=3, value_sum=np.array([1.0, 0.0])
+    )
+    root.edges[action_b] = MCTSEdge(
+        action=action_b, prior=0.5, n_act=2, visit_count=3, value_sum=np.array([9.0, 0.0])
+    )
+
+    for seed in range(10):
+        assert greedy_action(root, np.random.default_rng(seed), tie_break="value") == action_b

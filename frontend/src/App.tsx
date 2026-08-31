@@ -59,6 +59,15 @@ function App() {
   // `match.status` is already back to 'idle' by the time we ever see it here
   // and this effect is a no-op; a slow bot (e.g. MCTS) leaves it 'thinking',
   // and this is what picks the result up once it's ready.
+  //
+  // Refresh history on every tick, not just once status goes back to
+  // 'idle': with two bot seats and no human to hand control back to,
+  // `_run_autoplay_loop` plays the *entire* rest of the round in one
+  // "thinking" session (backend/src/skyjo/api/matches.py), so `status`
+  // never flips to 'idle' mid-round even though the board (this poll's
+  // `getMatch`) is already racing ahead move by move. Without this, the
+  // history panel would sit frozen for the whole round and then jump all
+  // at once at the end.
   useEffect(() => {
     const matchId = match?.match_id
     const status = match?.status
@@ -71,9 +80,8 @@ function App() {
         .then((updated) => {
           if (cancelled) return
           setMatch(updated)
-          if (updated.status === 'idle') {
-            refreshHistory(updated.match_id)
-          } else {
+          refreshHistory(updated.match_id)
+          if (updated.status !== 'idle') {
             timeoutId = window.setTimeout(poll, THINKING_POLL_INTERVAL_MS)
           }
         })
@@ -127,6 +135,7 @@ function App() {
     playerTypes: PlayerTypeName[],
     playerMctsModels: (string | null)[],
     playerMctsNumSimulations: (number | null)[],
+    playerMctsCapRootLead: boolean[],
   ) {
     setBusy(true)
     setError(null)
@@ -138,6 +147,7 @@ function App() {
         player_types: playerTypes,
         player_mcts_models: playerMctsModels,
         player_mcts_num_simulations: playerMctsNumSimulations,
+        player_mcts_cap_root_lead: playerMctsCapRootLead,
       })
       setMatch(created)
       storeMatchId(created.match_id)
@@ -214,6 +224,10 @@ function App() {
             thinkingPlayer={match.thinking_player}
           />
         )}
+        <nav className="dev-tools-nav" aria-label="Developer tools">
+          <a href="/tools/mcts-tree">🌳 Tree Explorer</a>
+          <a href="/tools/game-replay">🎬 Game Replay</a>
+        </nav>
       </header>
 
       <main>

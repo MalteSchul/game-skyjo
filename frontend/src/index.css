@@ -137,6 +137,20 @@ h1 {
 .app-header .scoreboard {
   margin: 0;
 }
+.dev-tools-nav {
+  display: flex;
+  gap: 14px;
+}
+.dev-tools-nav a {
+  font-size: 13px;
+  color: var(--text-muted);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.dev-tools-nav a:hover {
+  color: var(--text-h);
+  text-decoration: underline;
+}
 h2 {
   font-size: 24px;
   line-height: 118%;

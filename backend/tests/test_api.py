@@ -4,6 +4,7 @@ import time
 from fastapi.testclient import TestClient
 
 from skyjo.api import app, matches
+from skyjo.domain.engine import BOARD_SIZE, Card, GameState, PlayerBoard
 
 client = TestClient(app)
 
@@ -31,6 +32,15 @@ class _SlowBot:
             report_progress(0.5)
         self._release.wait(timeout=2.0)
         return turn.legal_actions[0]
+
+
+class _UnusedBot:
+    """Stands in for a seat's bot in tests that never actually reach a
+    decision point for it - e.g. a round_over state, where `choose_action`
+    should never be called."""
+
+    def choose_action(self, turn, *, report_progress=None):
+        raise NotImplementedError("not exercised by this test")
 
 
 def test_health_endpoint_responds_ok():
@@ -414,6 +424,29 @@ def test_create_match_rejects_a_player_mcts_num_simulations_length_mismatch():
     assert response.status_code == 400
 
 
+def test_create_match_uses_the_given_mcts_cap_root_lead():
+    response = client.post(
+        "/matches",
+        json={
+            "player_count": 2,
+            "player_types": ["mcts_bot", "human"],
+            "player_mcts_num_simulations": [2, None],
+            "player_mcts_cap_root_lead": [True, False],
+        },
+    )
+
+    assert response.status_code == 201
+
+
+def test_create_match_rejects_a_player_mcts_cap_root_lead_length_mismatch():
+    response = client.post(
+        "/matches",
+        json={"player_count": 2, "player_mcts_cap_root_lead": [True]},
+    )
+
+    assert response.status_code == 400
+
+
 def test_an_mcts_bot_seat_auto_plays_its_initial_flip(monkeypatch):
     # Keeps the real AlphaZeroNet -> MCTS -> factory -> API path intact, just
     # with few enough simulations per move to stay fast in CI.
@@ -473,6 +506,52 @@ def test_two_bot_seats_play_an_entire_round_automatically():
     assert body["legal_actions"] == []
 
 
+def test_two_bot_seats_carry_themselves_across_a_round_boundary_to_game_over():
+    # With no human seat to hand control back to at round_over, the match
+    # must not stall waiting for a "Start next round" click nobody will ever
+    # send - it should keep auto-playing, round after round, to game_over.
+    match_id = client.post(
+        "/matches",
+        json={"player_count": 2, "seed": 3, "player_types": ["random_bot", "random_bot"]},
+    ).json()["match_id"]
+
+    body = _wait_for_idle(client, match_id, timeout=10.0)
+
+    assert body["phase"] == "game_over"
+    assert body["legal_actions"] == []
+    assert max(body["total_scores"]) >= body["target_score"]
+    history = client.get(f"/matches/{match_id}/history").json()
+    assert any(node["edge"]["kind"] == "next_round" for node in history["nodes"])
+
+
+def test_a_round_over_match_with_a_human_seat_does_not_auto_advance():
+    # Unlike the all-bot case above, a human seat means someone has to click
+    # "Start next round" - the loop must not carry this forward on its own.
+    # Built directly at round_over (rather than played out through the API)
+    # so this doesn't depend on how many turns a real round happens to take.
+    board = PlayerBoard(cards=tuple(Card(value=1, face_up=True) for _ in range(BOARD_SIZE)))
+    state = GameState(
+        boards=(board, board),
+        stock=(),
+        discard=(1,),
+        current_player=0,
+        drawn_card=None,
+        finisher=0,
+        players_awaiting_final_turn=frozenset(),
+        round_scores=(12, 12),
+        total_scores=(12, 12),
+        phase="round_over",
+        reshuffle_seed=None,
+        target_score=100,
+    )
+    match_id = matches.store.create(state, ("Ada", "Grace"), ("random_bot", "human"), (_UnusedBot(), None))
+
+    matches._run_autoplay_loop(match_id)
+
+    head, _, _ = matches.store.get_head(match_id)
+    assert head.state.phase == "round_over"
+
+
 def test_goto_does_not_trigger_additional_bot_auto_play():
     match_id = client.post(
         "/matches",
@@ -503,7 +582,9 @@ def test_a_fully_human_match_reports_idle_status():
 def test_response_reports_thinking_status_while_a_slow_bot_is_still_deciding(monkeypatch):
     release = threading.Event()
 
-    def fake_create_bot(player_type, seed=None, mcts_model=None, num_simulations=None):
+    def fake_create_bot(
+        player_type, seed=None, mcts_model=None, num_simulations=None, cap_root_lead=False
+    ):
         return None if player_type == "human" else _SlowBot(release)
 
     monkeypatch.setattr(matches, "create_bot", fake_create_bot)
@@ -526,7 +607,9 @@ def test_response_reports_thinking_status_while_a_slow_bot_is_still_deciding(mon
 def test_polling_get_match_reaches_idle_once_a_slow_bot_finishes_deciding(monkeypatch):
     release = threading.Event()
 
-    def fake_create_bot(player_type, seed=None, mcts_model=None, num_simulations=None):
+    def fake_create_bot(
+        player_type, seed=None, mcts_model=None, num_simulations=None, cap_root_lead=False
+    ):
         return None if player_type == "human" else _SlowBot(release)
 
     monkeypatch.setattr(matches, "create_bot", fake_create_bot)
@@ -546,7 +629,9 @@ def test_polling_get_match_reaches_idle_once_a_slow_bot_finishes_deciding(monkey
 def test_actions_endpoint_returns_409_while_a_slow_bot_is_still_deciding(monkeypatch):
     release = threading.Event()
 
-    def fake_create_bot(player_type, seed=None, mcts_model=None, num_simulations=None):
+    def fake_create_bot(
+        player_type, seed=None, mcts_model=None, num_simulations=None, cap_root_lead=False
+    ):
         return None if player_type == "human" else _SlowBot(release)
 
     monkeypatch.setattr(matches, "create_bot", fake_create_bot)
@@ -566,7 +651,9 @@ def test_actions_endpoint_returns_409_while_a_slow_bot_is_still_deciding(monkeyp
 def test_goto_returns_409_while_a_slow_bot_is_still_deciding(monkeypatch):
     release = threading.Event()
 
-    def fake_create_bot(player_type, seed=None, mcts_model=None, num_simulations=None):
+    def fake_create_bot(
+        player_type, seed=None, mcts_model=None, num_simulations=None, cap_root_lead=False
+    ):
         return None if player_type == "human" else _SlowBot(release)
 
     monkeypatch.setattr(matches, "create_bot", fake_create_bot)

@@ -149,6 +149,7 @@ class MctsBot:
         num_simulations: int = DEFAULT_NUM_SIMULATIONS,
         c_puct: float = DEFAULT_C_PUCT,
         seed: int | None = None,
+        cap_root_lead: bool = False,
     ) -> None:
         if seed is not None and not isinstance(seed, int):
             raise TypeError("MctsBot: seed must be an int if provided")
@@ -157,6 +158,11 @@ class MctsBot:
         self._evaluate = evaluate
         self._num_simulations = num_simulations
         self._c_puct = c_puct
+        # See `rl.mcts.run_mcts`'s own `cap_root_lead` docstring: an eval-only
+        # root selection policy, off by default. Paired with `greedy_action`'s
+        # `tie_break="value"` in `choose_action` below - that's the hedge for
+        # the exact-tie case this policy can produce.
+        self._cap_root_lead = cap_root_lead
         self._rng = np.random.default_rng(seed)
         # This bot's own last fully-searched tree, kept around so the *next*
         # choose_action - once the real game has genuinely advanced to a
@@ -186,7 +192,15 @@ class MctsBot:
         self._last_decision_snapshots: dict[str, dict] | None = None
 
     def choose_action(self, turn: Turn, *, report_progress: ProgressReporter | None = None) -> Action:
-        reuse_root = self._cached_root
+        # cap_root_lead only bounds selection at whichever node is currently
+        # the *root* - a reused subtree spent its entire prior life as a
+        # non-root descendant, governed by plain uncapped `_select_edge`, so
+        # promoting it via reuse would carry over whatever lead it already
+        # had. cap_root_lead can only stop that lead from growing further
+        # from here, not retroactively unwind it - so a capped bot searches
+        # fresh every turn instead, trading reuse's latency benefit for the
+        # cap actually holding on every single decision.
+        reuse_root = None if self._cap_root_lead else self._cached_root
         if reuse_root is not None and reuse_root.state != gamestate_from_turn(turn):
             reuse_root = None
         already_visited = reuse_root.visit_count if reuse_root is not None else 0
@@ -227,6 +241,7 @@ class MctsBot:
             on_root_ready=on_root_ready,
             on_simulation=on_simulation if remaining > 0 else None,
             reuse_root=reuse_root,
+            cap_root_lead=self._cap_root_lead,
         )
         # Guarantees at least one (the final) snapshot even when none of
         # target_visit_counts landed exactly on the search's actual visit
@@ -235,8 +250,11 @@ class MctsBot:
             snapshots[str(root.visit_count)] = snapshot(root)
 
         # Most-visited (strongest) action, not a tau-sampled one - see
-        # `greedy_action`'s docstring for why ties are broken randomly.
-        best_action = greedy_action(root, self._rng)
+        # `greedy_action`'s docstring for why ties are broken randomly by
+        # default, and by value instead when `cap_root_lead` is on.
+        best_action = greedy_action(
+            root, self._rng, tie_break="value" if self._cap_root_lead else "random"
+        )
         self._cached_root = root
         self._last_decision_snapshots = snapshots
 

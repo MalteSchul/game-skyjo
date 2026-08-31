@@ -61,6 +61,7 @@ def _state(
     phase: str = "awaiting_draw",
     reshuffle_seed: int | None = None,
     target_score: int = 100,
+    drawn_card_source: str | None = None,
 ) -> GameState:
     return GameState(
         boards=boards,
@@ -75,6 +76,7 @@ def _state(
         phase=phase,
         reshuffle_seed=reshuffle_seed,
         target_score=target_score,
+        drawn_card_source=drawn_card_source,
     )
 
 
@@ -192,6 +194,101 @@ def test_place_without_completing_a_column_only_discards_the_swapped_out_card():
     state = apply_action(state, Action(ActionType.PLACE, position=0))
 
     assert state.discard == (0, 7, 0)
+
+
+# --- discard-sourced placement restriction ------------------------------------
+
+
+def test_discard_sourced_place_cannot_downgrade_a_face_up_card():
+    board0 = _reveal(_board_from_values([5, 1, 2, 3, 7, 4, 6, 7, 9, 8, 9, 10]), 0)
+    board1 = _board_from_values(list(range(12)))
+    state = _state(
+        (board0, board1),
+        stock=(1,),
+        discard=(2,),
+        current_player=0,
+        drawn_card=5,
+        phase="awaiting_placement",
+        drawn_card_source="discard",
+    )
+
+    assert Action(ActionType.PLACE, position=0) not in legal_actions(state)
+    with pytest.raises(IllegalActionError):
+        apply_action(state, Action(ActionType.PLACE, position=0))
+
+
+def test_discard_sourced_place_can_still_strictly_improve_a_face_up_card():
+    board0 = _reveal(_board_from_values([5, 1, 2, 3, 7, 4, 6, 7, 9, 8, 9, 10]), 0)
+    board1 = _board_from_values(list(range(12)))
+    state = _state(
+        (board0, board1),
+        stock=(1,),
+        discard=(2,),
+        current_player=0,
+        drawn_card=4,
+        phase="awaiting_placement",
+        drawn_card_source="discard",
+    )
+
+    assert Action(ActionType.PLACE, position=0) in legal_actions(state)
+    state = apply_action(state, Action(ActionType.PLACE, position=0))
+    assert state.boards[0].cards[0] == Card(value=4, face_up=True)
+
+
+def test_discard_sourced_place_completing_a_column_is_exempt_from_the_restriction():
+    # Column (0, 4, 8) shows 5, 5, 2 face-up; the discard-sourced 5 downgrades
+    # position 8's own value (2 <= 5) but completes the column, so it must
+    # stay legal despite the restriction.
+    board0 = _reveal(_board_from_values([5, 1, 2, 3, 5, 4, 6, 7, 2, 8, 9, 10]), 0, 4, 8)
+    board1 = _board_from_values(list(range(12)))
+    state = _state(
+        (board0, board1),
+        stock=(1,),
+        discard=(7,),
+        current_player=0,
+        drawn_card=5,
+        phase="awaiting_placement",
+        drawn_card_source="discard",
+    )
+
+    assert Action(ActionType.PLACE, position=8) in legal_actions(state)
+    state = apply_action(state, Action(ActionType.PLACE, position=8))
+    assert state.boards[0].cards[0] is None
+    assert state.boards[0].cards[4] is None
+    assert state.boards[0].cards[8] is None
+
+
+def test_stock_sourced_place_is_never_restricted():
+    board0 = _reveal(_board_from_values([5, 1, 2, 3, 7, 4, 6, 7, 9, 8, 9, 10]), 0)
+    board1 = _board_from_values(list(range(12)))
+    state = _state(
+        (board0, board1),
+        stock=(1,),
+        discard=(2,),
+        current_player=0,
+        drawn_card=5,
+        phase="awaiting_placement",
+        drawn_card_source="stock",
+    )
+
+    assert Action(ActionType.PLACE, position=0) in legal_actions(state)
+
+
+def test_discard_sourced_restriction_never_applies_to_face_down_targets_or_discard_and_reveal():
+    board0 = _board_from_values(list(range(12)))
+    board1 = _board_from_values(list(range(12)))
+    state = _state(
+        (board0, board1),
+        stock=(1,),
+        discard=(2,),
+        current_player=0,
+        drawn_card=0,
+        phase="awaiting_placement",
+        drawn_card_source="discard",
+    )
+
+    assert Action(ActionType.PLACE, position=1) in legal_actions(state)
+    assert Action(ActionType.DISCARD_AND_REVEAL, position=1) in legal_actions(state)
 
 
 # --- round end / scoring -----------------------------------------------------

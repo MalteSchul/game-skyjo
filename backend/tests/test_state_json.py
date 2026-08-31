@@ -90,6 +90,27 @@ def test_players_awaiting_final_turn_round_trips_as_a_frozenset():
     assert restored.players_awaiting_final_turn == frozenset({0, 2})
 
 
+def test_drawn_card_source_round_trips():
+    state = new_match(player_count=2, seed=1)
+    state = replace(state, phase="awaiting_placement", drawn_card=7, drawn_card_source="discard")
+
+    restored = game_state_from_dict(game_state_to_dict(state))
+
+    assert restored.drawn_card_source == "discard"
+
+
+def test_drawn_card_source_defaults_to_none_when_absent_from_the_dict():
+    # Guards a state file dumped before this field existed (e.g. the checked-in
+    # example_states fixtures) - it should still load, as an unrestricted state.
+    state = new_match(player_count=2, seed=1)
+    data = game_state_to_dict(state)
+    del data["drawn_card_source"]
+
+    restored = game_state_from_dict(data)
+
+    assert restored.drawn_card_source is None
+
+
 # --- checked-in example fixtures -----------------------------------------------
 
 

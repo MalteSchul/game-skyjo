@@ -31,10 +31,11 @@ from skyjo.domain.observation import Turn
 router = APIRouter(prefix="/matches", tags=["matches"])
 store = MatchStore()
 
-# A bot's move is a single `apply_action` call, so an entire round of mixed
-# human/bot play (initial_flip through round_over) is well under this - it's
-# only a backstop against a pathological future bot never converging.
-MAX_BOT_AUTOPLAY_STEPS = 2000
+# A bot's move is a single `apply_action` call. An all-bot match now plays
+# itself past round boundaries too (see `_run_autoplay_loop`), so this must
+# cover a whole game's worth of rounds to `target_score`, not just one round
+# - it's only a backstop against a pathological future bot never converging.
+MAX_BOT_AUTOPLAY_STEPS = 20000
 
 # How long a request blocks hoping the bot(s) it triggers finish inline. An
 # instant bot (e.g. RandomBot) always resolves well within this, so the
@@ -77,6 +78,9 @@ def create_match(request: NewMatchRequest) -> MatchStateOut:
     player_types = _resolve_player_types(request.player_types, request.player_count)
     mcts_models = _resolve_mcts_models(request.player_mcts_models, request.player_count)
     mcts_num_simulations = _resolve_mcts_num_simulations(request.player_mcts_num_simulations, request.player_count)
+    mcts_cap_root_lead = _resolve_mcts_cap_root_lead(
+        request.player_mcts_cap_root_lead, request.player_count
+    )
     try:
         bots = tuple(
             create_bot(
@@ -84,6 +88,7 @@ def create_match(request: NewMatchRequest) -> MatchStateOut:
                 seed=None if request.seed is None else request.seed + i,
                 mcts_model=mcts_models[i],
                 num_simulations=mcts_num_simulations[i],
+                cap_root_lead=mcts_cap_root_lead[i],
             )
             for i, player_type in enumerate(player_types)
         )
@@ -200,16 +205,26 @@ def _trigger_and_await(match_id: str) -> tuple[MatchNode, tuple[str, ...], tuple
 
 def _run_autoplay_loop(match_id: str) -> None:
     """Plays out consecutive bot turns from the current head until it's a
-    human's turn or the round/match ends. A single human action can hand
-    control to several bot seats in a row, and initial_flip needs more than
-    one action per seat, hence the loop rather than a single bot move. Runs
-    on the background thread started by MatchStore.trigger_autoplay - use
-    `apply_autoplay_action`, not `apply_action`, since this *is* the thread
-    that's allowed to act while status is "thinking"."""
+    human's turn or the match ends. A single human action can hand control to
+    several bot seats in a row, and initial_flip needs more than one action
+    per seat, hence the loop rather than a single bot move. When every seat
+    is a bot, a round_over is also carried straight into the next round -
+    otherwise nobody would ever be there to click "Start next round" and an
+    all-bot match would stall forever at the first round boundary. Runs on
+    the background thread started by MatchStore.trigger_autoplay - use
+    `apply_autoplay_action`/`autoplay_start_next_round`, not `apply_action`/
+    `start_next_round`, since this *is* the thread that's allowed to act
+    while status is "thinking"."""
     node, _player_names, _player_types = store.get_head(match_id)
     for _ in range(MAX_BOT_AUTOPLAY_STEPS):
-        if node.state.phase in ("round_over", "game_over"):
+        if node.state.phase == "game_over":
             return
+
+        if node.state.phase == "round_over":
+            if not store.all_seats_are_bots(match_id):
+                return
+            node, _player_names, _player_types = store.autoplay_start_next_round(match_id, start_next_round)
+            continue
 
         bot = store.get_bot(match_id, node.state.current_player)
         if bot is None:
@@ -265,6 +280,17 @@ def _resolve_mcts_models(models: list[str | None] | None, player_count: int) -> 
             detail=f"player_mcts_models must have exactly player_count ({player_count}) entries",
         )
     return tuple(models)
+
+
+def _resolve_mcts_cap_root_lead(values: list[bool] | None, player_count: int) -> tuple[bool, ...]:
+    if values is None:
+        return tuple(False for _ in range(player_count))
+    if len(values) != player_count:
+        raise HTTPException(
+            status_code=400,
+            detail=f"player_mcts_cap_root_lead must have exactly player_count ({player_count}) entries",
+        )
+    return tuple(values)
 
 
 # Keeps a misconfigured seat from making a request block indefinitely or

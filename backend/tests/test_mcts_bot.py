@@ -74,6 +74,31 @@ def test_rejects_a_negative_num_simulations():
         MctsBot(_uniform_evaluate, num_simulations=-1)
 
 
+def test_cap_root_lead_defaults_to_off():
+    bot = MctsBot(_uniform_evaluate, num_simulations=4, seed=1)
+
+    assert bot._cap_root_lead is False
+
+
+def test_cap_root_lead_bounds_the_root_visit_gap():
+    state = new_match(player_count=2, seed=7)
+    while state.phase == "initial_flip":
+        state = apply_action(state, engine_legal_actions(state)[0])
+    turn = Turn.from_state(state)
+    favored = engine_legal_actions(state)[0]
+
+    def evaluate(s):
+        actions = engine_legal_actions(s)
+        priors = {a: (0.9 if a == favored else 0.1 / max(len(actions) - 1, 1)) for a in actions}
+        return priors, np.zeros(len(s.boards))
+
+    bot = MctsBot(evaluate, num_simulations=200, seed=1, cap_root_lead=True)
+    bot.choose_action(turn)
+
+    counts = sorted(edge.visit_count for edge in bot._cached_root.edges.values())
+    assert counts[-1] - counts[-2] <= 2
+
+
 def test_choose_action_reports_progress_up_to_1_when_simulating():
     state = new_match(player_count=2, seed=1)
     turn = Turn.from_state(state)
@@ -382,6 +407,30 @@ def test_choose_action_reuses_the_cached_tree_after_a_matching_observe_transitio
     bot.choose_action(turn_after)
 
     assert bot._cached_root.visit_count == 10
+
+
+def test_choose_action_does_not_reuse_the_cached_tree_when_cap_root_lead_is_on():
+    # A reused subtree spent its entire prior life as a non-root descendant,
+    # governed by plain uncapped PUCT - promoting it via reuse would carry
+    # over whatever lead it already had, which cap_root_lead can only stop
+    # from growing further, not retroactively unwind. So a capped bot is
+    # expected to search a fresh root every turn instead.
+    state = _awaiting_draw_state(seed=1)
+    turn_before = Turn.from_state(state)
+    action = Action(type=ActionType.DRAW_DISCARD)
+    bot = MctsBot(_uniform_evaluate, num_simulations=10, seed=1, cap_root_lead=True)
+
+    bot.choose_action(turn_before)
+    edge = bot._cached_root.edges[action]
+
+    turn_after = Turn.from_state(apply_action(state, action))
+    bot.observe_transition(turn_before, action, turn_after)
+    assert bot._cached_root is edge.child  # sanity: still tracked, just goes unused for search
+
+    bot.choose_action(turn_after)
+
+    assert bot._cached_root is not edge.child  # a fresh root was built instead of reusing it
+    assert bot._cached_root.visit_count == 10  # still reaches the full target from scratch
 
 
 def test_choose_action_progress_reflects_visits_already_carried_over_on_reuse():

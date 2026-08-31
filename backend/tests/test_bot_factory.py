@@ -54,6 +54,18 @@ def test_mcts_bot_type_defaults_num_simulations_when_not_given():
     assert bot._num_simulations == default_num_simulations()
 
 
+def test_mcts_bot_type_uses_the_given_cap_root_lead():
+    bot = create_bot("mcts_bot", seed=5, cap_root_lead=True)
+
+    assert bot._cap_root_lead is True
+
+
+def test_mcts_bot_type_defaults_cap_root_lead_to_false_when_not_given():
+    bot = create_bot("mcts_bot", seed=5)
+
+    assert bot._cap_root_lead is False
+
+
 def test_rejects_an_unknown_player_type():
     with pytest.raises(ValueError):
         create_bot("grandmaster")

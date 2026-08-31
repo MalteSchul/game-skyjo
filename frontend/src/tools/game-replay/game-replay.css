@@ -1,0 +1,230 @@
+/* Game Replay — loads a `play_and_record_game.py` export. Sits on top of
+ * `mcts-tree.css` (same `.mcts-explorer` root, same tokens/utility classes:
+ * topbar, dropzone, buttons, stat tiles, chart card, value panel, bar
+ * cells) so this tool looks and behaves consistently with the tree
+ * explorer; only the bits genuinely specific to a whole-game view — the
+ * board layout, the override/round markers on the timeline, and the
+ * two-column policy comparison table — get their own rules here. */
+
+/* `.mcts-explorer` (mcts-tree.css) only sets `min-height: 100vh` - a floor,
+ * not a ceiling - so with unbounded content it just grows taller than the
+ * viewport and the whole page scrolls, leaving `.mtx-canvas`'s own `flex: 1;
+ * overflow: auto` with nothing to actually clip against. Pinning this page's
+ * own root to exactly 100vh gives that flex column a real, bounded height to
+ * distribute for the first time - the necessary other half of `.gr-canvas`'s
+ * own `min-height: 0` below (a flex item's default min-height: auto refuses
+ * to shrink below its content size, which would defeat the bound even with
+ * a fixed-height container). Scoped to this page only, not `.mcts-explorer`
+ * itself, since McTreeExplorerPage's own `.mtx-workspace` wrapper already
+ * handles this differently and shouldn't be affected. */
+.gr-page {
+  height: 100vh;
+}
+
+.gr-canvas {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+}
+
+/* Pinned to the top of .gr-canvas's own scroll area (see mcts-tree.css's
+ * `.mtx-canvas { overflow: auto }`) so it stays reachable while everything
+ * below it - boards, chart, decision detail - scrolls underneath. Scoped to
+ * this page's own canvas rather than editing the shared `.mtx-scrubber`
+ * class directly, since `SnapshotScrubber` (mcts-tree) also uses it and
+ * shouldn't become sticky there. */
+.gr-canvas .mtx-scrubber {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  box-shadow: var(--shadow-sm);
+}
+
+.gr-boards-row {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.gr-boards-row .player-board {
+  flex: 1;
+  min-width: 260px;
+}
+
+/* A card only showing its value because of "reveal hidden cards" - echoes
+ * index.css's own `.card-face-down` diagonal-stripe motif (same 135deg/5px
+ * repeat) as a semi-transparent overlay, so a forced reveal never reads as
+ * identical to a genuinely face-up card. `pointer-events: none` keeps the
+ * (non-interactive, in this tool) card underneath from being blocked. */
+.gr-secret-card {
+  position: relative;
+}
+.gr-secret-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 10px;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    135deg,
+    color-mix(in oklab, var(--accent) 65%, transparent),
+    color-mix(in oklab, var(--accent) 65%, transparent) 5px,
+    transparent 5px,
+    transparent 10px
+  );
+}
+@media (max-width: 480px) {
+  .gr-secret-card::after {
+    border-radius: 8px;
+  }
+}
+
+/* ---------- decision-timeline markers ---------- */
+
+.gr-marker-filter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.gr-marker-filter .mtx-field-label {
+  margin-bottom: 0;
+}
+.gr-marker-filter .mode-toggle-btn {
+  font-size: 13px;
+  padding: 6px 12px;
+}
+
+.gr-scrubber-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+/* The input and its marker lane(s) live in the same box precisely so a
+ * marker's `left: N%` and the input's own value land on the same pixel — see
+ * DecisionScrubber's comment for the one source of drift this still doesn't
+ * correct (native thumb inset). */
+.gr-scrubber-track-wrap {
+  position: relative;
+}
+/* `.mtx-scrubber-range` normally gets its width from `flex: 1` inside
+ * `SnapshotScrubber`'s flex row - outside that context (here, a plain block)
+ * flex-basis doesn't apply and it collapses to the browser's intrinsic
+ * <input type="range"> width instead, which is what actually made the bar
+ * look "small" - the markers were already correctly spread across the full
+ * track. */
+.gr-scrubber-track-wrap .mtx-scrubber-range {
+  display: block;
+  width: 100%;
+}
+/* Each lane is a normal-flow row (not absolutely overlaid on the input) so
+ * a second lane can stack below the first without covering it - only its
+ * horizontal inset needs to match the input's, not its vertical position. */
+.gr-scrubber-markers {
+  position: relative;
+  height: 8px;
+  margin: 4px 7px 0;
+}
+.gr-scrubber-marker {
+  position: absolute;
+  top: 0;
+  width: 12px;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  transform: translateX(-50%);
+  cursor: pointer;
+  pointer-events: auto;
+}
+.gr-scrubber-marker::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  transform: translateX(-50%);
+  border-radius: 1px;
+  background: currentColor;
+}
+.gr-scrubber-marker:hover::after,
+.gr-scrubber-marker:focus-visible::after {
+  width: 3px;
+}
+.gr-scrubber-marker:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.gr-scrubber-marker-override {
+  color: var(--danger);
+}
+.gr-scrubber-marker-round {
+  color: var(--text-muted);
+  opacity: 0.6;
+}
+.gr-scrubber-marker-heuristic {
+  color: var(--mtx-player-6);
+}
+.gr-scrubber-marker-sampling {
+  color: var(--mtx-player-1);
+}
+
+/* ---------- policy comparison table ---------- */
+
+.gr-cols-policy {
+  display: grid;
+  grid-template-columns: minmax(160px, 1.4fr) minmax(140px, 1fr) minmax(140px, 1fr);
+  align-items: center;
+  column-gap: 16px;
+  padding: 8px 13px;
+  border-top: 1px solid var(--border);
+}
+div.mtx-col-header.gr-cols-policy {
+  border-top: none;
+}
+
+/* Training self-play recordings add two columns (Dirichlet-noised prior,
+ * tau-tempered pi) the eval-style 3-column layout above has no room for. */
+.gr-cols-policy-selfplay {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.2fr) repeat(4, minmax(110px, 1fr));
+  align-items: center;
+  column-gap: 12px;
+  padding: 8px 13px;
+  border-top: 1px solid var(--border);
+}
+div.mtx-col-header.gr-cols-policy-selfplay {
+  border-top: none;
+}
+
+/* ---------- value comparison (initial vs. final Q-value per action) ---------- */
+
+.gr-value-compare-title {
+  padding: 10px 13px 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.gr-cols-value {
+  display: grid;
+  grid-template-columns: minmax(160px, 1.4fr) minmax(140px, 1fr) minmax(140px, 1fr);
+  align-items: center;
+  column-gap: 16px;
+  padding: 8px 13px;
+  border-top: 1px solid var(--border);
+}
+div.mtx-col-header.gr-cols-value {
+  border-top: none;
+}
+
+.gr-decision-detail {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 20px;
+}
