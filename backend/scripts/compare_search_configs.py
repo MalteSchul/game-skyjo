@@ -25,11 +25,17 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from skyjo.domain.engine import Action, apply_action, force_close_round, new_match, start_next_round  # noqa: E402
-from skyjo.domain.observation import Turn  # noqa: E402
-from skyjo.rl.evaluator import make_network_evaluator  # noqa: E402
-from skyjo.rl.game_recorder import load_net  # noqa: E402
-from skyjo.rl.mcts import greedy_action, run_mcts  # noqa: E402
+from skyjo.domain.engine import (
+    Action,
+    apply_action,
+    force_close_round,
+    new_match,
+    start_next_round,
+)
+from skyjo.domain.observation import Turn
+from skyjo.rl.evaluator import make_network_evaluator
+from skyjo.rl.game_recorder import load_net
+from skyjo.rl.mcts import greedy_action, run_mcts
 
 DEFAULT_CONFIGS = [(50, False), (50, True), (100, False), (100, True), (200, False), (200, True)]
 
@@ -112,7 +118,7 @@ def main() -> None:
     print(f"{'sims':>5} {'noise':>6} | {'disagreements':>13} | {'rate':>7}")
     for sims, noise in configs:
         n = disagree_counts[(sims, noise)]
-        print(f"{sims:>5} {str(noise):>6} | {n:>13} | {100*n/total_decisions:>6.1f}%")
+        print(f"{sims:>5} {noise!s:>6} | {n:>13} | {100*n/total_decisions:>6.1f}%")
 
     print()
     print("first 5 disagreements per config:")

@@ -1,7 +1,5 @@
 from pathlib import Path
 
-import torch
-
 from skyjo.rl.checkpoint import save_checkpoint
 from skyjo.rl.game_recorder import record_training_selfplay_game
 from skyjo.rl.network import AlphaZeroNet

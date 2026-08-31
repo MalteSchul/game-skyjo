@@ -22,7 +22,6 @@ make sense for the general Observation.
 from __future__ import annotations
 
 from dataclasses import dataclass
-
 from typing import Literal
 
 from skyjo.domain.engine import (

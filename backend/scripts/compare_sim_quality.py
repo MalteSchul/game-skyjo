@@ -22,11 +22,17 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from skyjo.domain.engine import Action, apply_action, force_close_round, new_match, start_next_round  # noqa: E402
-from skyjo.domain.observation import Turn  # noqa: E402
-from skyjo.rl.evaluator import make_network_evaluator  # noqa: E402
-from skyjo.rl.game_recorder import load_net  # noqa: E402
-from skyjo.rl.mcts import greedy_action, run_mcts  # noqa: E402
+from skyjo.domain.engine import (
+    Action,
+    apply_action,
+    force_close_round,
+    new_match,
+    start_next_round,
+)
+from skyjo.domain.observation import Turn
+from skyjo.rl.evaluator import make_network_evaluator
+from skyjo.rl.game_recorder import load_net
+from skyjo.rl.mcts import greedy_action, run_mcts
 
 JUDGE_SIMS = 400
 

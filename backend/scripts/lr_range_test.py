@@ -27,9 +27,9 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from skyjo.rl.bootstrap import load_replay_samples  # noqa: E402
-from skyjo.rl.network import AlphaZeroNet  # noqa: E402
-from skyjo.rl.train import collate_batch, training_step  # noqa: E402
+from skyjo.rl.bootstrap import load_replay_samples
+from skyjo.rl.network import AlphaZeroNet
+from skyjo.rl.train import collate_batch, training_step
 
 _SPARK_CHARS = ".-:=+*#%@"
 
