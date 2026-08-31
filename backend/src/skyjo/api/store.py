@@ -169,6 +169,19 @@ class _MatchTree:
         self.head_id = node.node_id
         return node
 
+    def ancestors(self, node_id: str) -> list[MatchNode]:
+        """`node_id` and every node above it up to the root, oldest first -
+        the linear path a `goto` walked to get there, as opposed to
+        `self.nodes.values()` which is every node in the whole (possibly
+        branching) tree."""
+        chain = []
+        cur: MatchNode | None = self.node(node_id)
+        while cur is not None:
+            chain.append(cur)
+            cur = self.nodes[cur.parent_id] if cur.parent_id is not None else None
+        chain.reverse()
+        return chain
+
 
 class MatchStore:
     def __init__(self) -> None:
@@ -215,6 +228,17 @@ class MatchStore:
         with self._lock:
             tree = self._tree(match_id)
             return list(tree.nodes.values()), tree.head_id, tree.player_names
+
+    def get_round_history(self, match_id: str, node_id: str) -> list[MatchNode]:
+        """Every round-closing node (`state.round_scores is not None` - see
+        `domain.engine._score_and_close_round`/`force_close_round`) on the
+        path from the root to `node_id`, oldest first: one entry per round
+        completed so far as of wherever `node_id` sits in history, for a
+        running "score per round" breakdown rather than just the cumulative
+        `total_scores`."""
+        with self._lock:
+            tree = self._tree(match_id)
+            return [n for n in tree.ancestors(node_id) if n.state.round_scores is not None]
 
     def apply_action(
         self, match_id: str, action: Action, compute_state

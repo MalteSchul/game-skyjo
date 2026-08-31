@@ -5,6 +5,7 @@ import KeyboardHelp from './KeyboardHelp'
 import NewMatchForm from './NewMatchForm'
 import PlayerBoard, { BOARD_COLUMNS } from './PlayerBoard'
 import RestartConfirm from './RestartConfirm'
+import { finisherWasDoubled } from './scoring'
 
 function isTypingTarget(target: EventTarget | null): boolean {
   return target instanceof HTMLElement && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
@@ -280,12 +281,30 @@ function MatchView({
         <div className="status-panel">
           <h2>Round over</h2>
           <ul className="round-scores">
-            {match.round_scores?.map((score, i) => (
-              <li key={i}>
-                <span>{match.player_names[i]}</span>
-                <span>{score} pts</span>
-              </li>
-            ))}
+            {match.round_scores?.map((score, i) => {
+              const isFinisher = i === match.finisher
+              const doubled = isFinisher && finisherWasDoubled(match.round_scores!, i)
+              return (
+                <li key={i}>
+                  <span>{match.player_names[i]}</span>
+                  <span>
+                    {score} pts
+                    {isFinisher && (
+                      <span
+                        className={`round-double-badge ${doubled ? 'round-double-badge-doubled' : 'round-double-badge-safe'}`}
+                        title={
+                          doubled
+                            ? "Finished without the sole lowest score, so this round's score was doubled"
+                            : 'Finished with the sole lowest score, so this round\'s score was not doubled'
+                        }
+                      >
+                        {doubled ? `×2 → ${score * 2}` : 'not doubled'}
+                      </span>
+                    )}
+                  </span>
+                </li>
+              )
+            })}
           </ul>
           <button type="button" className="btn-primary" onClick={onNextRound} disabled={busy}>
             Start next round

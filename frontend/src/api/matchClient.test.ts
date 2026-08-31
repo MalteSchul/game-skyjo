@@ -32,6 +32,7 @@ const MATCH: MatchStateOut = {
   players_awaiting_final_turn: [],
   round_scores: null,
   total_scores: [0, 0],
+  round_history: [],
   target_score: 100,
   legal_actions: [],
   status: 'idle',

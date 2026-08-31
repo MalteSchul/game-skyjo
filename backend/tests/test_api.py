@@ -552,6 +552,77 @@ def test_a_round_over_match_with_a_human_seat_does_not_auto_advance():
     assert head.state.phase == "round_over"
 
 
+# --- round_history --------------------------------------------------------
+
+
+def test_round_history_is_empty_before_any_round_has_closed():
+    match_id = client.post(
+        "/matches",
+        json={"player_count": 2, "player_types": ["human", "human"]},
+    ).json()["match_id"]
+
+    body = client.get(f"/matches/{match_id}").json()
+
+    assert body["round_history"] == []
+
+
+def test_round_history_gains_an_entry_once_a_round_closes_and_survives_into_the_next_round():
+    # Built directly at round_over (see test_a_round_over_match_with_a_human_seat_
+    # does_not_auto_advance above) so this doesn't depend on how many turns a
+    # real round happens to take.
+    board = PlayerBoard(cards=tuple(Card(value=1, face_up=True) for _ in range(BOARD_SIZE)))
+    state = GameState(
+        boards=(board, board),
+        stock=(),
+        discard=(1,),
+        current_player=0,
+        drawn_card=None,
+        finisher=0,
+        players_awaiting_final_turn=frozenset(),
+        round_scores=(12, 24),
+        total_scores=(12, 24),
+        phase="round_over",
+        reshuffle_seed=1,
+        target_score=100,
+    )
+    match_id = matches.store.create(state, ("Ada", "Grace"), ("human", "human"), (None, None))
+
+    body = client.get(f"/matches/{match_id}").json()
+    assert body["round_history"] == [{"scores": [12, 24], "finisher": 0}]
+
+    # Dealing round 2 doesn't drop round 1's entry - it's a running history,
+    # not just "the round that just closed".
+    next_body = client.post(f"/matches/{match_id}/next-round").json()
+    assert next_body["phase"] == "initial_flip"
+    assert next_body["round_history"] == [{"scores": [12, 24], "finisher": 0}]
+
+
+def test_round_history_reports_no_finisher_for_a_force_closed_round():
+    # force_close_round (see domain.engine's own docstring) has no real
+    # finisher - RoundResultOut.finisher must come back null, not crash or
+    # fabricate a seat index.
+    board = PlayerBoard(cards=tuple(Card(value=2, face_up=True) for _ in range(BOARD_SIZE)))
+    state = GameState(
+        boards=(board, board),
+        stock=(),
+        discard=(1,),
+        current_player=0,
+        drawn_card=None,
+        finisher=None,
+        players_awaiting_final_turn=frozenset(),
+        round_scores=(7, 9),
+        total_scores=(7, 9),
+        phase="round_over",
+        reshuffle_seed=None,
+        target_score=100,
+    )
+    match_id = matches.store.create(state, ("Ada", "Grace"), ("human", "human"), (None, None))
+
+    body = client.get(f"/matches/{match_id}").json()
+
+    assert body["round_history"] == [{"scores": [7, 9], "finisher": None}]
+
+
 def test_goto_does_not_trigger_additional_bot_auto_play():
     match_id = client.post(
         "/matches",

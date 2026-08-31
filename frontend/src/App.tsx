@@ -222,6 +222,7 @@ function App() {
             currentPlayer={match.current_player}
             status={match.status}
             thinkingPlayer={match.thinking_player}
+            roundHistory={match.round_history}
           />
         )}
         <nav className="dev-tools-nav" aria-label="Developer tools">

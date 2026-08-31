@@ -97,6 +97,25 @@ class ActionOut(BaseModel):
         return cls(type=action_type_to_name(action.type), position=action.position)
 
 
+class RoundResultOut(BaseModel):
+    """One completed round's contribution to the match: the raw (undoubled)
+    per-player scores and who finished it - see `api.store.MatchStore.
+    get_round_history`. Lets the UI show a running per-round breakdown
+    instead of only the cumulative `total_scores`, and work out for itself
+    (mirroring `domain.engine._score_and_close_round`'s rule) whether the
+    finisher's score was doubled. `finisher` is None only for a
+    `force_close_round` outcome (an escape hatch with no real finisher - see
+    that function's docstring), which never doubles."""
+
+    scores: list[int]
+    finisher: int | None
+
+    @classmethod
+    def from_node(cls, node: MatchNode) -> RoundResultOut:
+        assert node.state.round_scores is not None
+        return cls(scores=list(node.state.round_scores), finisher=node.state.finisher)
+
+
 class MatchStateOut(BaseModel):
     match_id: str
     phase: Phase
@@ -111,6 +130,9 @@ class MatchStateOut(BaseModel):
     players_awaiting_final_turn: list[int]
     round_scores: list[int] | None
     total_scores: list[int]
+    # Every round completed so far on the way to this state, oldest first -
+    # see RoundResultOut.
+    round_history: list[RoundResultOut]
     target_score: int
     legal_actions: list[ActionOut]
     status: MatchStatus
@@ -125,6 +147,7 @@ class MatchStateOut(BaseModel):
         player_names: Sequence[str],
         player_types: Sequence[str],
         autoplay_status: AutoplayStatus,
+        round_history: Sequence[MatchNode] = (),
     ) -> MatchStateOut:
         return cls(
             match_id=match_id,
@@ -140,6 +163,7 @@ class MatchStateOut(BaseModel):
             players_awaiting_final_turn=sorted(state.players_awaiting_final_turn),
             round_scores=list(state.round_scores) if state.round_scores is not None else None,
             total_scores=list(state.total_scores),
+            round_history=[RoundResultOut.from_node(n) for n in round_history],
             target_score=state.target_score,
             legal_actions=[ActionOut.from_action(a) for a in legal_actions(state)],
             status=autoplay_status.status,
