@@ -99,7 +99,7 @@ describe('matchClient', () => {
     const history: MatchHistoryOut = {
       head_id: 'n1',
       nodes: [
-        { node_id: 'n1', parent_id: null, seq: 0, round_index: 0, actor: null, current_player: 0, phase: 'initial_flip', edge: { kind: 'root', action_type: null, position: null }, has_mcts_tree: false },
+        { node_id: 'n1', parent_id: null, seq: 0, round_index: 0, actor: null, current_player: 0, phase: 'initial_flip', edge: { kind: 'root', action_type: null, position: null }, has_mcts_tree: false, mcts_visit_share: null, mcts_prior_overridden: null },
       ],
     }
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(history)))

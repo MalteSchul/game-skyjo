@@ -77,6 +77,8 @@ const ROOT_ONLY_HISTORY: MatchHistoryOut = {
       phase: 'initial_flip',
       edge: { kind: 'root', action_type: null, position: null },
       has_mcts_tree: false,
+      mcts_visit_share: null,
+      mcts_prior_overridden: null,
     },
   ],
 }

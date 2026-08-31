@@ -187,6 +187,37 @@ class HistoryEdgeOut(BaseModel):
         return cls(kind="action", action_type=action_type_to_name(edge.action.type), position=edge.action.position)
 
 
+def _mcts_decision_summary(mcts_tree: dict | None) -> tuple[float | None, bool | None]:
+    """Two cheap-to-compute signals summarizing a node's recorded search
+    (see `MatchNode.mcts_tree`), read off its finished (highest-visit-count)
+    snapshot - lets the history panel show "how certain was this" and "did
+    search change its mind" per node without shipping the whole tree down the
+    wire.
+
+    `mcts_visit_share`: the chosen (most-visited) action's share of total
+    root visits - 1.0 means every simulation agreed, lower means the search
+    seriously considered an alternative.
+
+    `mcts_prior_overridden`: whether that chosen action differs from the
+    network's own raw top prior - i.e. search's conclusion overrode the
+    network's first instinct rather than just confirming it.
+
+    Both `None` for a node with no recorded search, or a root with no visited
+    edges (can happen for `num_simulations=0`)."""
+    if not mcts_tree:
+        return None, None
+    final = mcts_tree[max(mcts_tree, key=int)]
+    edges = final.get("edges", [])
+    total_visits = sum(e["visit_count"] for e in edges)
+    if not edges or total_visits == 0:
+        return None, None
+    # `tree_to_dict` sorts a decision node's edges by visit_count descending,
+    # so edges[0] is already the chosen action.
+    top_by_visits = edges[0]
+    top_by_prior = max(edges, key=lambda e: e["prior"])
+    return top_by_visits["visit_count"] / total_visits, top_by_visits["action"] != top_by_prior["action"]
+
+
 class HistoryNodeOut(BaseModel):
     node_id: str
     parent_id: str | None
@@ -200,9 +231,13 @@ class HistoryNodeOut(BaseModel):
     # return for this node - lets the history panel show a tree affordance
     # only where one actually exists, without probing every node.
     has_mcts_tree: bool
+    # See `_mcts_decision_summary` above. Both None whenever has_mcts_tree is False.
+    mcts_visit_share: float | None
+    mcts_prior_overridden: bool | None
 
     @classmethod
     def from_node(cls, node: MatchNode) -> HistoryNodeOut:
+        visit_share, prior_overridden = _mcts_decision_summary(node.mcts_tree)
         return cls(
             node_id=node.node_id,
             parent_id=node.parent_id,
@@ -213,6 +248,8 @@ class HistoryNodeOut(BaseModel):
             phase=node.state.phase,
             edge=HistoryEdgeOut.from_edge(node.edge),
             has_mcts_tree=node.mcts_tree is not None,
+            mcts_visit_share=visit_share,
+            mcts_prior_overridden=prior_overridden,
         )
 
 

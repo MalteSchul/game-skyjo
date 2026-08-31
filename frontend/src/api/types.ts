@@ -83,6 +83,8 @@ export interface HistoryNodeOut {
   phase: Phase
   edge: HistoryEdgeOut
   has_mcts_tree: boolean
+  mcts_visit_share: number | null
+  mcts_prior_overridden: boolean | null
 }
 
 export interface MatchHistoryOut {

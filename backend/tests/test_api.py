@@ -790,6 +790,30 @@ def test_history_node_reports_has_mcts_tree_only_for_the_bots_move(monkeypatch):
     assert bot_move["has_mcts_tree"] is True
 
 
+def test_history_node_reports_mcts_visit_share_and_prior_overridden_only_for_the_bots_move(monkeypatch):
+    monkeypatch.setenv("SKYJO_MCTS_NUM_SIMULATIONS", "2")
+
+    match_id = client.post(
+        "/matches",
+        json={"player_count": 2, "seed": 7, "player_types": ["mcts_bot", "human"]},
+    ).json()["match_id"]
+    _wait_for_idle(client, match_id, timeout=10.0)
+
+    nodes = client.get(f"/matches/{match_id}/history").json()["nodes"]
+    root = next(n for n in nodes if n["actor"] is None)
+    bot_move = next(n for n in nodes if n["actor"] == 0)
+    assert root["mcts_visit_share"] is None
+    assert root["mcts_prior_overridden"] is None
+    assert bot_move["mcts_visit_share"] is not None
+    assert 0.0 < bot_move["mcts_visit_share"] <= 1.0
+    assert bot_move["mcts_prior_overridden"] in (True, False)
+
+    tree = client.get(f"/matches/{match_id}/history/{bot_move['node_id']}/mcts-tree").json()
+    final = tree[str(max(int(k) for k in tree))]
+    total_visits = sum(e["visit_count"] for e in final["edges"])
+    assert bot_move["mcts_visit_share"] == final["edges"][0]["visit_count"] / total_visits
+
+
 def test_mcts_tree_endpoint_reflects_the_move_at_that_node_even_after_further_search(monkeypatch):
     # A later decision (this bot's own next move, from further along the same
     # match) must not retroactively change what an earlier node's tree looks

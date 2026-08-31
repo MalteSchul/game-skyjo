@@ -20,6 +20,17 @@ function laneColor(lane: number): string {
   return LANE_COLORS[lane % LANE_COLORS.length]
 }
 
+/** Coarse confidence tier for a search's `mcts_visit_share` (how much of the
+ * root's visits piled onto the chosen move) - drives the badge's color so
+ * "search was sure" vs. "search was torn" reads at a glance without doing
+ * the math. Thresholds are a rough eyeball split, not derived from anything
+ * principled. */
+function visitShareTone(share: number): 'high' | 'mid' | 'low' {
+  if (share >= 0.7) return 'high'
+  if (share >= 0.4) return 'mid'
+  return 'low'
+}
+
 function describeNode(node: HistoryNodeOut, playerNames: string[]): string {
   const { edge } = node
   if (edge.kind === 'root') return 'Game start'
@@ -195,6 +206,24 @@ function GraphRows({ rows, laneCount, headId, matchId, playerNames, onGoto, busy
             >
               {describeNode(info.node, playerNames)}
             </button>
+            {info.node.mcts_visit_share !== null && (
+              <span
+                className={`history-visit-share history-visit-share-${visitShareTone(info.node.mcts_visit_share)}`}
+                title={`Search put ${Math.round(info.node.mcts_visit_share * 100)}% of its visits on this move`}
+              >
+                {Math.round(info.node.mcts_visit_share * 100)}%
+              </span>
+            )}
+            {info.node.mcts_prior_overridden && (
+              <span
+                className="history-prior-overridden"
+                role="img"
+                aria-label="Search overrode the network's initial top pick"
+                title="Search overrode the network's initial top pick"
+              >
+                🔀
+              </span>
+            )}
             {info.node.has_mcts_tree && (
               <a
                 className="history-tree-link"

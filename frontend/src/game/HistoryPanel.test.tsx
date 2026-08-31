@@ -14,6 +14,8 @@ function node(overrides: Partial<HistoryNodeOut>): HistoryNodeOut {
     phase: 'initial_flip',
     edge: { kind: 'root', action_type: null, position: null },
     has_mcts_tree: false,
+    mcts_visit_share: null,
+    mcts_prior_overridden: null,
     ...overrides,
   }
 }
@@ -222,6 +224,61 @@ describe('HistoryPanel', () => {
     const treeLinks = screen.getAllByRole('link', { name: /search tree/ })
     expect(treeLinks).toHaveLength(1)
     expect(treeLinks[0]).toHaveAttribute('href', '/tools/mcts-tree?matchId=m0&nodeId=n1')
+  })
+
+  it('shows the search\'s visit share as a percentage badge, colored by how confident it was (happy path)', () => {
+    const history: MatchHistoryOut = {
+      head_id: 'n1',
+      nodes: [
+        node({ node_id: 'n0' }),
+        node({
+          node_id: 'n1',
+          parent_id: 'n0',
+          seq: 1,
+          actor: 0,
+          edge: { kind: 'action', action_type: 'draw_stock', position: null },
+          has_mcts_tree: true,
+          mcts_visit_share: 0.82,
+        }),
+      ],
+    }
+    const { container } = render(<HistoryPanel history={history} matchId="m0" playerNames={['Ada']} onGoto={vi.fn()} busy={false} />)
+
+    const badge = screen.getByText('82%')
+    expect(badge).toBeInTheDocument()
+    expect(badge).toHaveClass('history-visit-share-high')
+    expect(container.querySelector('.history-prior-overridden')).not.toBeInTheDocument()
+  })
+
+  it('marks a node where search overrode the network\'s raw top prior (happy path)', () => {
+    const history: MatchHistoryOut = {
+      head_id: 'n1',
+      nodes: [
+        node({ node_id: 'n0' }),
+        node({
+          node_id: 'n1',
+          parent_id: 'n0',
+          seq: 1,
+          actor: 0,
+          edge: { kind: 'action', action_type: 'draw_stock', position: null },
+          has_mcts_tree: true,
+          mcts_visit_share: 0.35,
+          mcts_prior_overridden: true,
+        }),
+      ],
+    }
+    render(<HistoryPanel history={history} matchId="m0" playerNames={['Ada']} onGoto={vi.fn()} busy={false} />)
+
+    expect(screen.getByText('35%')).toHaveClass('history-visit-share-low')
+    expect(screen.getByRole('img', { name: /overrode the network/ })).toBeInTheDocument()
+  })
+
+  it('omits the visit-share badge and override marker for a node with no recorded search (sad path)', () => {
+    const history: MatchHistoryOut = { head_id: 'n0', nodes: [node({ node_id: 'n0' })] }
+    const { container } = render(<HistoryPanel history={history} matchId="m0" playerNames={[]} onGoto={vi.fn()} busy={false} />)
+
+    expect(container.querySelector('.history-visit-share')).not.toBeInTheDocument()
+    expect(container.querySelector('.history-prior-overridden')).not.toBeInTheDocument()
   })
 
   it('closes the full-history popup without navigating when the backdrop is clicked (sad path)', () => {
