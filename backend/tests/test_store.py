@@ -2,7 +2,7 @@ import threading
 
 import pytest
 
-from skyjo.api.store import AutoplayStatus, MatchBusyError, MatchStore
+from skyjo.api.store import AutoplayStatus, MatchBusyError, MatchNotFoundError, MatchStore
 from skyjo.domain.engine import Action, ActionType, apply_action, new_match
 from skyjo.domain.observation import Turn
 
@@ -287,3 +287,44 @@ def test_get_node_does_not_move_the_head():
 
     assert fetched.node_id == root_id
     assert store.get_head(match_id)[0].node_id == head_before
+
+
+# --- all-bot round auto-advance -------------------------------------------------
+
+
+class _DummyBot:
+    def choose_action(self, turn, *, report_progress=None):
+        raise NotImplementedError("not exercised by these tests")
+
+
+def test_all_seats_are_bots_is_true_when_every_seat_has_a_bot():
+    store = MatchStore()
+    state = new_match(player_count=2, seed=1)
+    match_id = store.create(state, ("Ada", "Grace"), ("random_bot", "random_bot"), (_DummyBot(), _DummyBot()))
+
+    assert store.all_seats_are_bots(match_id) is True
+
+
+def test_all_seats_are_bots_is_false_when_any_seat_is_human():
+    store = MatchStore()
+    state = new_match(player_count=2, seed=1)
+    match_id = store.create(state, ("Ada", "Grace"), ("random_bot", "human"), (_DummyBot(), None))
+
+    assert store.all_seats_are_bots(match_id) is False
+
+
+def test_all_seats_are_bots_raises_for_an_unknown_match():
+    store = MatchStore()
+
+    with pytest.raises(MatchNotFoundError):
+        store.all_seats_are_bots("does-not-exist")
+
+
+def test_autoplay_start_next_round_is_allowed_while_thinking():
+    store = MatchStore()
+    match_id = _new_match_id(store)
+    store.set_thinking(match_id, player=0)
+
+    node, _, _ = store.autoplay_start_next_round(match_id, lambda state: state)
+
+    assert node.edge is not None and node.edge.kind == "next_round"
