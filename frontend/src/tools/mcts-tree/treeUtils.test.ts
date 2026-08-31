@@ -78,7 +78,7 @@ const ROOT: DecisionNode = {
 describe('actionLabel', () => {
   it('renders known action types in plain language (happy path)', () => {
     expect(actionLabel({ type: 'DRAW_STOCK', position: null })).toBe('Draw stock')
-    expect(actionLabel({ type: 'PLACE', position: 5 })).toBe('Place → slot 5')
+    expect(actionLabel({ type: 'PLACE', position: 5 })).toBe('Place → r2c2')
   })
 
   it('falls back to "TYPE @ position" for an unrecognized action type (sad path)', () => {

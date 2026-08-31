@@ -1,9 +1,20 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { HistoryNodeOut, MatchHistoryOut } from '../api/types'
+import { BOARD_COLUMNS } from './PlayerBoard'
 
 const LANE_WIDTH = 18
 const WINDOW_RADIUS = 5
+
+/** 1-indexed "rRcC" for a board position (0-indexed, row-major over
+ * BOARD_COLUMNS-wide rows) - the one position-naming scheme used everywhere
+ * a position needs a human label, so it reads identically here, in the MCTS
+ * tree explorer, and in the game-replay tool (see those tools' own
+ * `rowColLabel`, duplicated rather than imported - same reasoning as their
+ * already-duplicated `actionLabel`). */
+function rowColLabel(position: number): string {
+  return `r${Math.floor(position / BOARD_COLUMNS) + 1}c${(position % BOARD_COLUMNS) + 1}`
+}
 
 // Reuses the game's existing card-tone palette so branch colors feel like
 // part of the same design system instead of an arbitrary new one.
@@ -37,19 +48,19 @@ function describeNode(node: HistoryNodeOut, playerNames: string[]): string {
   if (edge.kind === 'next_round') return `Round ${node.round_index + 1} begins`
 
   const actorName = (node.actor !== null && playerNames[node.actor]) || `Player ${(node.actor ?? 0) + 1}`
-  const slot = edge.position !== null ? edge.position + 1 : null
+  const where = edge.position !== null ? rowColLabel(edge.position) : null
 
   switch (edge.action_type) {
     case 'flip_initial':
-      return `${actorName} flipped card ${slot}`
+      return `${actorName} flipped ${where}`
     case 'draw_stock':
       return `${actorName} drew from the stock`
     case 'draw_discard':
       return `${actorName} drew from the discard`
     case 'place':
-      return `${actorName} placed on card ${slot}`
+      return `${actorName} placed on ${where}`
     case 'discard_and_reveal':
-      return `${actorName} discarded & flipped card ${slot}`
+      return `${actorName} discarded & flipped ${where}`
     default:
       return `${actorName} played`
   }

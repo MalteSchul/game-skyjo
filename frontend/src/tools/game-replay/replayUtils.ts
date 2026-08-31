@@ -1,11 +1,22 @@
 import type { DecisionReplay, GameReplay, ReplayAction } from './types'
 
+const BOARD_COLUMNS = 4
+
+/** 1-indexed "rRcC" for a board position (0-indexed, row-major over
+ * BOARD_COLUMNS-wide rows) - the one position-naming scheme used everywhere
+ * a position needs a human label. Duplicated from `game/HistoryPanel.tsx` /
+ * `tools/mcts-tree/treeUtils.ts` for the same reason `actionLabel` below is
+ * its own copy rather than an import - see that function's docstring. */
+function rowColLabel(position: number): string {
+  return `r${Math.floor(position / BOARD_COLUMNS) + 1}c${(position % BOARD_COLUMNS) + 1}`
+}
+
 const ACTION_LABELS: Record<string, (position: number | null) => string> = {
   DRAW_STOCK: () => 'Draw stock',
   DRAW_DISCARD: () => 'Draw discard',
-  PLACE: (p) => `Place → slot ${p}`,
-  FLIP_INITIAL: (p) => `Flip slot ${p}`,
-  DISCARD_AND_REVEAL: (p) => `Discard & reveal slot ${p}`,
+  PLACE: (p) => `Place → ${rowColLabel(p!)}`,
+  FLIP_INITIAL: (p) => `Flip ${rowColLabel(p!)}`,
+  DISCARD_AND_REVEAL: (p) => `Discard & reveal ${rowColLabel(p!)}`,
 }
 
 /** Duplicated from `tools/mcts-tree/treeUtils.ts` rather than imported: that

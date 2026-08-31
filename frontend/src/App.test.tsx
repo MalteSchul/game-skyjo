@@ -258,7 +258,7 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
     await screen.findByRole('heading', { name: /Player 1/ })
     fireEvent.click(screen.getAllByRole('button', { name: 'face-down card' })[0])
-    await screen.findByText('Player 1 flipped card 1')
+    await screen.findByText('Player 1 flipped r1c1')
 
     fireEvent.click(screen.getByRole('button', { name: 'Game start' }))
 
@@ -290,7 +290,7 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
     await screen.findByRole('heading', { name: /Player 1/ })
     fireEvent.click(screen.getAllByRole('button', { name: 'face-down card' })[0])
-    await screen.findByText('Player 1 flipped card 1')
+    await screen.findByText('Player 1 flipped r1c1')
 
     fireEvent.click(screen.getByRole('button', { name: 'Game start' }))
 

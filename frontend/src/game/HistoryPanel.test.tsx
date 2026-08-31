@@ -46,7 +46,7 @@ describe('HistoryPanel', () => {
 
     const panel = screen.getByLabelText('Match history')
     expect(within(panel).getByText('Game start')).toBeInTheDocument()
-    const move = within(panel).getByText('Ada flipped card 3')
+    const move = within(panel).getByText('Ada flipped r1c3')
     fireEvent.click(move)
 
     expect(onGoto).toHaveBeenCalledWith('n1')
@@ -88,7 +88,7 @@ describe('HistoryPanel', () => {
     render(<HistoryPanel history={history} matchId="m0" playerNames={['Ada', 'Grace']} onGoto={vi.fn()} busy={false} />)
 
     const labels = screen.getAllByRole('button').map((btn) => btn.textContent)
-    expect(labels).toEqual(['Grace flipped card 2', 'Ada flipped card 1', 'Game start'])
+    expect(labels).toEqual(['Grace flipped r1c2', 'Ada flipped r1c1', 'Game start'])
   })
 
   it('puts a diverging branch in its own graph lane, not nested under the trunk (happy path)', () => {
@@ -114,8 +114,8 @@ describe('HistoryPanel', () => {
     }
     const { container } = render(<HistoryPanel history={history} matchId="m0" playerNames={['Ada']} onGoto={vi.fn()} busy={false} />)
 
-    expect(screen.getByText('Ada flipped card 1')).toBeInTheDocument()
-    expect(screen.getByText('Ada flipped card 2')).toBeInTheDocument()
+    expect(screen.getByText('Ada flipped r1c1')).toBeInTheDocument()
+    expect(screen.getByText('Ada flipped r1c2')).toBeInTheDocument()
     // Two sibling branches off the same root must occupy two distinct graph
     // lanes (columns), which is what makes this a graph rather than a list.
     const dots = container.querySelectorAll('.lane-dot')
@@ -152,7 +152,7 @@ describe('HistoryPanel', () => {
     const distinctLanes = new Set(Array.from(dots).map((dot) => (dot as HTMLElement).style.left))
     // Trunk + b1's lane + d1/c1 sharing one reused lane = 3 lanes total, not 4.
     expect(distinctLanes.size).toBe(3)
-    expect(laneLeftOf('Ada drew from the stock')).toBe(laneLeftOf('Ada flipped card 3'))
+    expect(laneLeftOf('Ada drew from the stock')).toBe(laneLeftOf('Ada flipped r1c3'))
   })
 
   it('shows only a window of steps around the current head and lists the rest behind "View full history" (happy path)', () => {
