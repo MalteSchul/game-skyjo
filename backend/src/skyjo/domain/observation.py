@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from typing import Literal
+
 from skyjo.domain.engine import (
     Action,
     Card,
@@ -70,6 +72,11 @@ class Observation:
     current_player: int
     phase: Phase
     drawn_card: int | None
+    # Where drawn_card came from - not hidden info (the acting player always
+    # knows this about their own draw), so it's exposed here even though it
+    # only affects legality, not what's shown to a viewer. See
+    # engine.legal_actions's discard-swap restriction.
+    drawn_card_source: Literal["stock", "discard"] | None
     finisher: int | None
     players_awaiting_final_turn: frozenset[int]
     round_scores: tuple[int, ...] | None
@@ -88,6 +95,7 @@ class Observation:
             current_player=state.current_player,
             phase=state.phase,
             drawn_card=state.drawn_card,
+            drawn_card_source=state.drawn_card_source,
             finisher=state.finisher,
             players_awaiting_final_turn=state.players_awaiting_final_turn,
             round_scores=state.round_scores,
@@ -112,6 +120,11 @@ class Turn:
     discard_count: int
     stock_count: int
     drawn_card: int | None
+    # See Observation.drawn_card_source - not hidden info, and specifically
+    # needed here: a policy conditions on legal_actions, and this is what
+    # makes engine.legal_actions's discard-swap restriction reproducible
+    # from a Turn alone (see rl.hidden_info.gamestate_from_turn).
+    drawn_card_source: Literal["stock", "discard"] | None
     finisher: int | None
     players_awaiting_final_turn: frozenset[int]
     total_scores: tuple[int, ...]
@@ -132,6 +145,7 @@ class Turn:
             discard_count=len(state.discard),
             stock_count=len(state.stock),
             drawn_card=state.drawn_card,
+            drawn_card_source=state.drawn_card_source,
             finisher=state.finisher,
             players_awaiting_final_turn=state.players_awaiting_final_turn,
             total_scores=state.total_scores,

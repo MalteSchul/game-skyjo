@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from skyjo.bots.heuristic_bot import HeuristicBot
-from skyjo.domain.engine import ActionType, new_match
+from skyjo.domain.engine import Action, ActionType, new_match
 from skyjo.domain.engine import legal_actions as engine_legal_actions
 from skyjo.domain.observation import Turn
 from skyjo.rl.action_space import ACTION_SPACE_SIZE, action_to_index
@@ -36,6 +36,28 @@ def _degenerate_place_zero_evaluate(state):
         preferred = actions[0]
     priors = {a: (1.0 if a == preferred else 0.0) for a in actions}
     return priors, np.zeros(len(state.boards))
+
+
+def _swap_into_position_zero(turn: Turn) -> Action:
+    """Always takes the discard over the stock, and always tries to PLACE it
+    at position 0 regardless of whether that's an improvement - TODO.md's
+    "take the discard, swap it for a same-or-near-value card, discard that;
+    the opposing bot mirrors it" pattern in its most literal form, as a
+    direct `Turn -> Action` callable (no MCTS/network involved, so nothing
+    about it is randomized by root noise - see
+    `test_generate_bot_episode_finishes_despite_two_players_mirroring_a_discard_swap`).
+    Before `engine.legal_actions` blocked a discard-sourced non-improving
+    swap, two players both running this could keep trading position 0's
+    value back and forth without ever revealing a new face-down card, i.e.
+    never finishing the round on their own.
+    """
+    if turn.phase == "initial_flip":
+        return next(a for a in turn.legal_actions if a.type == ActionType.FLIP_INITIAL)
+    if turn.phase == "awaiting_draw":
+        draw_discard = Action(ActionType.DRAW_DISCARD)
+        return draw_discard if draw_discard in turn.legal_actions else Action(ActionType.DRAW_STOCK)
+    preferred = Action(ActionType.PLACE, position=0)
+    return preferred if preferred in turn.legal_actions else turn.legal_actions[0]
 
 
 # --- happy path ------------------------------------------------------------
@@ -193,6 +215,24 @@ def test_generate_episode_stops_after_max_rounds_even_short_of_target_score():
 
     assert len(samples) > 0
     assert sum(samples[-1].y.tolist()) == 1  # still a valid 2-player rank permutation
+
+
+# --- generate_bot_episode: the discard-swap restriction itself prevents a stall
+
+
+def test_generate_bot_episode_finishes_despite_two_players_mirroring_a_discard_swap():
+    # generate_bot_episode has no round_max_steps/force-close safety valve at
+    # all (only the global max_steps) - reaching game_over here is possible
+    # only because engine.legal_actions's discard-swap restriction itself
+    # breaks the mirrored cycle, not because anything papers over a stall.
+    state = new_match(player_count=2, seed=1)
+
+    samples = generate_bot_episode(
+        state, [_swap_into_position_zero, _swap_into_position_zero], max_steps=5000
+    )
+
+    assert len(samples) > 0
+    assert sorted(samples[-1].y.tolist()) == [0, 1]
 
 
 # --- generate_episodes_batch ------------------------------------------------

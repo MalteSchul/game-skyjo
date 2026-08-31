@@ -46,6 +46,7 @@ def game_state_to_dict(state: GameState) -> dict[str, Any]:
         "phase": state.phase,
         "reshuffle_seed": state.reshuffle_seed,
         "target_score": state.target_score,
+        "drawn_card_source": state.drawn_card_source,
     }
 
 
@@ -63,4 +64,8 @@ def game_state_from_dict(data: dict[str, Any]) -> GameState:
         phase=data["phase"],
         reshuffle_seed=data["reshuffle_seed"],
         target_score=data["target_score"],
+        # .get, not [...]: absent in state files dumped before this field
+        # existed (e.g. scripts/example_states/*.json) - None is the correct
+        # read for those anyway, since they predate the restriction it drives.
+        drawn_card_source=data.get("drawn_card_source"),
     )
