@@ -47,6 +47,7 @@ const INITIAL_FLIP_MATCH: MatchStateOut = {
   players_awaiting_final_turn: [],
   round_scores: null,
   total_scores: [0, 0],
+  round_history: [],
   target_score: 100,
   legal_actions: Array.from({ length: 12 }, (_, i) => ({ type: 'flip_initial' as const, position: i })),
   status: 'idle',

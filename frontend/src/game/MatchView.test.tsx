@@ -21,6 +21,7 @@ const BASE_MATCH: MatchStateOut = {
   players_awaiting_final_turn: [],
   round_scores: null,
   total_scores: [0, 0],
+  round_history: [],
   target_score: 100,
   legal_actions: Array.from({ length: 12 }, (_, i) => ({ type: 'flip_initial' as const, position: i })),
   status: 'idle',
@@ -229,6 +230,70 @@ describe('MatchView', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start next round' }))
 
     expect(onNextRound).toHaveBeenCalledTimes(1)
+  })
+
+  it('marks the finisher\'s round score as doubled when they didn\'t have the sole lowest score (happy path)', () => {
+    const match: MatchStateOut = { ...BASE_MATCH, phase: 'round_over', finisher: 0, round_scores: [9, 4] }
+    render(
+      <MatchView
+        match={match}
+        error={null}
+        busy={false}
+        discardMode={false}
+        onCreate={noop}
+        onDrawStock={noop}
+        onDrawDiscard={noop}
+        onSetDiscardMode={noop}
+        onCardClick={noop}
+        onNextRound={noop}
+        onPlayAgain={noop}
+      />,
+    )
+
+    expect(screen.getByText('×2 → 18')).toBeInTheDocument()
+  })
+
+  it('marks the finisher\'s round score as not doubled when it was the sole lowest score (sad path)', () => {
+    const match: MatchStateOut = { ...BASE_MATCH, phase: 'round_over', finisher: 0, round_scores: [4, 9] }
+    render(
+      <MatchView
+        match={match}
+        error={null}
+        busy={false}
+        discardMode={false}
+        onCreate={noop}
+        onDrawStock={noop}
+        onDrawDiscard={noop}
+        onSetDiscardMode={noop}
+        onCardClick={noop}
+        onNextRound={noop}
+        onPlayAgain={noop}
+      />,
+    )
+
+    expect(screen.getByText('not doubled')).toBeInTheDocument()
+    expect(screen.queryByText(/×2/)).not.toBeInTheDocument()
+  })
+
+  it('still doubles the finisher when they only tie for lowest, not own it outright (bad path)', () => {
+    const match: MatchStateOut = { ...BASE_MATCH, phase: 'round_over', finisher: 0, round_scores: [4, 4] }
+    render(
+      <MatchView
+        match={match}
+        error={null}
+        busy={false}
+        discardMode={false}
+        onCreate={noop}
+        onDrawStock={noop}
+        onDrawDiscard={noop}
+        onSetDiscardMode={noop}
+        onCardClick={noop}
+        onNextRound={noop}
+        onPlayAgain={noop}
+      />,
+    )
+
+    expect(screen.getByText('×2 → 8')).toBeInTheDocument()
   })
 
   it('calls onPlayAgain when "Play again" is clicked after game_over (happy path)', () => {
