@@ -135,5 +135,22 @@ def training_step(
     optimizer.zero_grad()
     loss, metrics = compute_loss(net, batch, lambda_rank=lambda_rank, lambda_points=lambda_points, l2_coef=l2_coef)
     loss.backward()
+
+    grad_norm = torch.sqrt(sum(p.grad.detach().pow(2).sum() for p in net.parameters() if p.grad is not None))
+    # Adam's actual step isn't `lr * grad` (it's normalized by the running
+    # second-moment estimate), so the update/weight ratio is measured from
+    # the real before/after parameter delta rather than approximated from
+    # lr and the raw gradient - that keeps it meaningful under Adam too.
+    params_before = [p.detach().clone() for p in net.parameters()]
+
     optimizer.step()
+
+    with torch.no_grad():
+        update_norm = torch.sqrt(
+            sum((p.detach() - before).pow(2).sum() for p, before in zip(net.parameters(), params_before, strict=True))
+        )
+        weight_norm = torch.sqrt(sum(before.pow(2).sum() for before in params_before))
+
+    metrics["grad_norm"] = float(grad_norm)
+    metrics["update_ratio"] = float(update_norm / (weight_norm + _LOG_EPS))
     return metrics
