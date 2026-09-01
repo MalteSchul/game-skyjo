@@ -59,7 +59,7 @@ function decision(overrides: Partial<DecisionReplay> = {}): DecisionReplay {
 describe('actionLabel', () => {
   it('renders known action types with position where relevant (happy path)', () => {
     expect(actionLabel({ type: 'DRAW_STOCK', position: null })).toBe('Draw stock')
-    expect(actionLabel({ type: 'PLACE', position: 3 })).toBe('Place → slot 3')
+    expect(actionLabel({ type: 'PLACE', position: 3 })).toBe('Place → r1c4')
   })
 
   it('falls back to a generic label for an unknown action type (bad path)', () => {

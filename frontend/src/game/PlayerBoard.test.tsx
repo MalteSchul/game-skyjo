@@ -145,6 +145,64 @@ describe('PlayerBoard', () => {
     expect(onCardFocus).toHaveBeenCalledWith(0)
   })
 
+  it('shows the sum of currently face-up card values as a running visible total (happy path)', () => {
+    const board = boardWith([
+      { value: 5, face_up: true },
+      { value: null, face_up: false },
+      { value: 3, face_up: true },
+    ])
+    render(
+      <PlayerBoard
+        board={board}
+        name="Ada"
+        isCurrentPlayer={false}
+        isFinalTurn={false}
+        clickablePositions={new Set()}
+        rovingPosition={null}
+        onCardClick={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText('Σ 8')).toBeInTheDocument()
+  })
+
+  it('shows a visible total of 0 when no cards are face up yet (sad path)', () => {
+    const board = boardWith([
+      { value: null, face_up: false },
+      { value: null, face_up: false },
+    ])
+    render(
+      <PlayerBoard
+        board={board}
+        name="Ada"
+        isCurrentPlayer={false}
+        isFinalTurn={false}
+        clickablePositions={new Set()}
+        rovingPosition={null}
+        onCardClick={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText('Σ 0')).toBeInTheDocument()
+  })
+
+  it('ignores cleared (null) columns when summing the visible total (bad path)', () => {
+    const board = boardWith([null, null, { value: 7, face_up: true }])
+    render(
+      <PlayerBoard
+        board={board}
+        name="Ada"
+        isCurrentPlayer={false}
+        isFinalTurn={false}
+        clickablePositions={new Set()}
+        rovingPosition={null}
+        onCardClick={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText('Σ 7')).toBeInTheDocument()
+  })
+
   it('registers and clears button refs via onCardRef as cards mount and unmount (sad path)', () => {
     const onCardRef = vi.fn()
     const { rerender } = render(

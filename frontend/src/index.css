@@ -550,6 +550,36 @@ p {
   font-weight: 600;
 }
 
+.history-visit-share {
+  flex-shrink: 0;
+  align-self: center;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--mono);
+  padding: 1px 5px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.history-visit-share-high {
+  background: var(--tone-low-bg);
+  color: var(--tone-low-fg);
+}
+.history-visit-share-mid {
+  background: var(--tone-mid-bg);
+  color: var(--tone-mid-fg);
+}
+.history-visit-share-low {
+  background: var(--tone-high-bg);
+  color: var(--tone-high-fg);
+}
+
+.history-prior-overridden {
+  flex-shrink: 0;
+  align-self: center;
+  font-size: 12px;
+  line-height: 1;
+}
+
 .history-tree-link {
   flex-shrink: 0;
   display: inline-flex;
@@ -753,14 +783,39 @@ kbd {
 
 .score-chip {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px 6px 14px;
+  gap: 2px 8px;
+  padding: 6px 10px 6px 14px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: 16px;
   font-size: 14px;
   color: var(--text);
   background: var(--bg-panel);
+}
+
+.score-chip-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.score-chip-rounds {
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--text-muted);
+}
+
+.score-chip-round-sep {
+  color: var(--text-muted);
+}
+
+.score-chip-round-doubled {
+  margin-left: 2px;
+  color: var(--danger);
+  font-weight: 700;
 }
 
 .score-chip-value {
@@ -999,6 +1054,25 @@ kbd {
   font-weight: 600;
 }
 
+.round-double-badge {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  vertical-align: middle;
+}
+.round-double-badge-doubled {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+.round-double-badge-safe {
+  background: var(--tone-low-bg);
+  color: var(--tone-low-fg);
+}
+
 .winner-line {
   font-size: 16px;
   color: var(--text-h);
@@ -1043,6 +1117,17 @@ kbd {
   gap: 6px;
   margin: 0 0 14px;
   font-size: 16px;
+}
+
+.visible-total-chip {
+  display: inline-flex;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--code-bg);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--mono);
+  font-weight: 600;
 }
 
 .turn-chip {

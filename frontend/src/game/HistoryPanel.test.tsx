@@ -14,6 +14,8 @@ function node(overrides: Partial<HistoryNodeOut>): HistoryNodeOut {
     phase: 'initial_flip',
     edge: { kind: 'root', action_type: null, position: null },
     has_mcts_tree: false,
+    mcts_visit_share: null,
+    mcts_prior_overridden: null,
     ...overrides,
   }
 }
@@ -44,7 +46,7 @@ describe('HistoryPanel', () => {
 
     const panel = screen.getByLabelText('Match history')
     expect(within(panel).getByText('Game start')).toBeInTheDocument()
-    const move = within(panel).getByText('Ada flipped card 3')
+    const move = within(panel).getByText('Ada flipped r1c3')
     fireEvent.click(move)
 
     expect(onGoto).toHaveBeenCalledWith('n1')
@@ -86,7 +88,7 @@ describe('HistoryPanel', () => {
     render(<HistoryPanel history={history} matchId="m0" playerNames={['Ada', 'Grace']} onGoto={vi.fn()} busy={false} />)
 
     const labels = screen.getAllByRole('button').map((btn) => btn.textContent)
-    expect(labels).toEqual(['Grace flipped card 2', 'Ada flipped card 1', 'Game start'])
+    expect(labels).toEqual(['Grace flipped r1c2', 'Ada flipped r1c1', 'Game start'])
   })
 
   it('puts a diverging branch in its own graph lane, not nested under the trunk (happy path)', () => {
@@ -112,8 +114,8 @@ describe('HistoryPanel', () => {
     }
     const { container } = render(<HistoryPanel history={history} matchId="m0" playerNames={['Ada']} onGoto={vi.fn()} busy={false} />)
 
-    expect(screen.getByText('Ada flipped card 1')).toBeInTheDocument()
-    expect(screen.getByText('Ada flipped card 2')).toBeInTheDocument()
+    expect(screen.getByText('Ada flipped r1c1')).toBeInTheDocument()
+    expect(screen.getByText('Ada flipped r1c2')).toBeInTheDocument()
     // Two sibling branches off the same root must occupy two distinct graph
     // lanes (columns), which is what makes this a graph rather than a list.
     const dots = container.querySelectorAll('.lane-dot')
@@ -150,7 +152,7 @@ describe('HistoryPanel', () => {
     const distinctLanes = new Set(Array.from(dots).map((dot) => (dot as HTMLElement).style.left))
     // Trunk + b1's lane + d1/c1 sharing one reused lane = 3 lanes total, not 4.
     expect(distinctLanes.size).toBe(3)
-    expect(laneLeftOf('Ada drew from the stock')).toBe(laneLeftOf('Ada flipped card 3'))
+    expect(laneLeftOf('Ada drew from the stock')).toBe(laneLeftOf('Ada flipped r1c3'))
   })
 
   it('shows only a window of steps around the current head and lists the rest behind "View full history" (happy path)', () => {
@@ -222,6 +224,61 @@ describe('HistoryPanel', () => {
     const treeLinks = screen.getAllByRole('link', { name: /search tree/ })
     expect(treeLinks).toHaveLength(1)
     expect(treeLinks[0]).toHaveAttribute('href', '/tools/mcts-tree?matchId=m0&nodeId=n1')
+  })
+
+  it('shows the search\'s visit share as a percentage badge, colored by how confident it was (happy path)', () => {
+    const history: MatchHistoryOut = {
+      head_id: 'n1',
+      nodes: [
+        node({ node_id: 'n0' }),
+        node({
+          node_id: 'n1',
+          parent_id: 'n0',
+          seq: 1,
+          actor: 0,
+          edge: { kind: 'action', action_type: 'draw_stock', position: null },
+          has_mcts_tree: true,
+          mcts_visit_share: 0.82,
+        }),
+      ],
+    }
+    const { container } = render(<HistoryPanel history={history} matchId="m0" playerNames={['Ada']} onGoto={vi.fn()} busy={false} />)
+
+    const badge = screen.getByText('82%')
+    expect(badge).toBeInTheDocument()
+    expect(badge).toHaveClass('history-visit-share-high')
+    expect(container.querySelector('.history-prior-overridden')).not.toBeInTheDocument()
+  })
+
+  it('marks a node where search overrode the network\'s raw top prior (happy path)', () => {
+    const history: MatchHistoryOut = {
+      head_id: 'n1',
+      nodes: [
+        node({ node_id: 'n0' }),
+        node({
+          node_id: 'n1',
+          parent_id: 'n0',
+          seq: 1,
+          actor: 0,
+          edge: { kind: 'action', action_type: 'draw_stock', position: null },
+          has_mcts_tree: true,
+          mcts_visit_share: 0.35,
+          mcts_prior_overridden: true,
+        }),
+      ],
+    }
+    render(<HistoryPanel history={history} matchId="m0" playerNames={['Ada']} onGoto={vi.fn()} busy={false} />)
+
+    expect(screen.getByText('35%')).toHaveClass('history-visit-share-low')
+    expect(screen.getByRole('img', { name: /overrode the network/ })).toBeInTheDocument()
+  })
+
+  it('omits the visit-share badge and override marker for a node with no recorded search (sad path)', () => {
+    const history: MatchHistoryOut = { head_id: 'n0', nodes: [node({ node_id: 'n0' })] }
+    const { container } = render(<HistoryPanel history={history} matchId="m0" playerNames={[]} onGoto={vi.fn()} busy={false} />)
+
+    expect(container.querySelector('.history-visit-share')).not.toBeInTheDocument()
+    expect(container.querySelector('.history-prior-overridden')).not.toBeInTheDocument()
   })
 
   it('closes the full-history popup without navigating when the backdrop is clicked (sad path)', () => {

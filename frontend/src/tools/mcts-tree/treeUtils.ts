@@ -2,12 +2,23 @@ import type { ChanceEdge, DecisionAction, DecisionEdge, SnapshotMap, TreeNode } 
 
 export type EdgeKind = 'decision' | 'chance'
 
+const BOARD_COLUMNS = 4
+
+/** 1-indexed "rRcC" for a board position (0-indexed, row-major over
+ * BOARD_COLUMNS-wide rows) - the one position-naming scheme used everywhere
+ * a position needs a human label (see `game/HistoryPanel.tsx`'s own copy of
+ * this, duplicated rather than imported for the same reason `actionLabel`
+ * below is duplicated into `tools/game-replay/replayUtils.ts`). */
+function rowColLabel(position: number): string {
+  return `r${Math.floor(position / BOARD_COLUMNS) + 1}c${(position % BOARD_COLUMNS) + 1}`
+}
+
 const ACTION_LABELS: Record<string, (position: number | null) => string> = {
   DRAW_STOCK: () => 'Draw stock',
   DRAW_DISCARD: () => 'Draw discard',
-  PLACE: (p) => `Place → slot ${p}`,
-  FLIP_INITIAL: (p) => `Flip slot ${p}`,
-  DISCARD_AND_REVEAL: (p) => `Discard & reveal slot ${p}`,
+  PLACE: (p) => `Place → ${rowColLabel(p!)}`,
+  FLIP_INITIAL: (p) => `Flip ${rowColLabel(p!)}`,
+  DISCARD_AND_REVEAL: (p) => `Discard & reveal ${rowColLabel(p!)}`,
 }
 
 export function actionLabel(action: DecisionAction): string {

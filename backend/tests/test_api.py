@@ -552,6 +552,77 @@ def test_a_round_over_match_with_a_human_seat_does_not_auto_advance():
     assert head.state.phase == "round_over"
 
 
+# --- round_history --------------------------------------------------------
+
+
+def test_round_history_is_empty_before_any_round_has_closed():
+    match_id = client.post(
+        "/matches",
+        json={"player_count": 2, "player_types": ["human", "human"]},
+    ).json()["match_id"]
+
+    body = client.get(f"/matches/{match_id}").json()
+
+    assert body["round_history"] == []
+
+
+def test_round_history_gains_an_entry_once_a_round_closes_and_survives_into_the_next_round():
+    # Built directly at round_over (see test_a_round_over_match_with_a_human_seat_
+    # does_not_auto_advance above) so this doesn't depend on how many turns a
+    # real round happens to take.
+    board = PlayerBoard(cards=tuple(Card(value=1, face_up=True) for _ in range(BOARD_SIZE)))
+    state = GameState(
+        boards=(board, board),
+        stock=(),
+        discard=(1,),
+        current_player=0,
+        drawn_card=None,
+        finisher=0,
+        players_awaiting_final_turn=frozenset(),
+        round_scores=(12, 24),
+        total_scores=(12, 24),
+        phase="round_over",
+        reshuffle_seed=1,
+        target_score=100,
+    )
+    match_id = matches.store.create(state, ("Ada", "Grace"), ("human", "human"), (None, None))
+
+    body = client.get(f"/matches/{match_id}").json()
+    assert body["round_history"] == [{"scores": [12, 24], "finisher": 0}]
+
+    # Dealing round 2 doesn't drop round 1's entry - it's a running history,
+    # not just "the round that just closed".
+    next_body = client.post(f"/matches/{match_id}/next-round").json()
+    assert next_body["phase"] == "initial_flip"
+    assert next_body["round_history"] == [{"scores": [12, 24], "finisher": 0}]
+
+
+def test_round_history_reports_no_finisher_for_a_force_closed_round():
+    # force_close_round (see domain.engine's own docstring) has no real
+    # finisher - RoundResultOut.finisher must come back null, not crash or
+    # fabricate a seat index.
+    board = PlayerBoard(cards=tuple(Card(value=2, face_up=True) for _ in range(BOARD_SIZE)))
+    state = GameState(
+        boards=(board, board),
+        stock=(),
+        discard=(1,),
+        current_player=0,
+        drawn_card=None,
+        finisher=None,
+        players_awaiting_final_turn=frozenset(),
+        round_scores=(7, 9),
+        total_scores=(7, 9),
+        phase="round_over",
+        reshuffle_seed=None,
+        target_score=100,
+    )
+    match_id = matches.store.create(state, ("Ada", "Grace"), ("human", "human"), (None, None))
+
+    body = client.get(f"/matches/{match_id}").json()
+
+    assert body["round_history"] == [{"scores": [7, 9], "finisher": None}]
+
+
 def test_goto_does_not_trigger_additional_bot_auto_play():
     match_id = client.post(
         "/matches",
@@ -717,6 +788,30 @@ def test_history_node_reports_has_mcts_tree_only_for_the_bots_move(monkeypatch):
     bot_move = next(n for n in nodes if n["actor"] == 0)
     assert root["has_mcts_tree"] is False
     assert bot_move["has_mcts_tree"] is True
+
+
+def test_history_node_reports_mcts_visit_share_and_prior_overridden_only_for_the_bots_move(monkeypatch):
+    monkeypatch.setenv("SKYJO_MCTS_NUM_SIMULATIONS", "2")
+
+    match_id = client.post(
+        "/matches",
+        json={"player_count": 2, "seed": 7, "player_types": ["mcts_bot", "human"]},
+    ).json()["match_id"]
+    _wait_for_idle(client, match_id, timeout=10.0)
+
+    nodes = client.get(f"/matches/{match_id}/history").json()["nodes"]
+    root = next(n for n in nodes if n["actor"] is None)
+    bot_move = next(n for n in nodes if n["actor"] == 0)
+    assert root["mcts_visit_share"] is None
+    assert root["mcts_prior_overridden"] is None
+    assert bot_move["mcts_visit_share"] is not None
+    assert 0.0 < bot_move["mcts_visit_share"] <= 1.0
+    assert bot_move["mcts_prior_overridden"] in (True, False)
+
+    tree = client.get(f"/matches/{match_id}/history/{bot_move['node_id']}/mcts-tree").json()
+    final = tree[str(max(int(k) for k in tree))]
+    total_visits = sum(e["visit_count"] for e in final["edges"])
+    assert bot_move["mcts_visit_share"] == final["edges"][0]["visit_count"] / total_visits
 
 
 def test_mcts_tree_endpoint_reflects_the_move_at_that_node_even_after_further_search(monkeypatch):

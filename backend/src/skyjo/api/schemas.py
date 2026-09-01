@@ -97,6 +97,25 @@ class ActionOut(BaseModel):
         return cls(type=action_type_to_name(action.type), position=action.position)
 
 
+class RoundResultOut(BaseModel):
+    """One completed round's contribution to the match: the raw (undoubled)
+    per-player scores and who finished it - see `api.store.MatchStore.
+    get_round_history`. Lets the UI show a running per-round breakdown
+    instead of only the cumulative `total_scores`, and work out for itself
+    (mirroring `domain.engine._score_and_close_round`'s rule) whether the
+    finisher's score was doubled. `finisher` is None only for a
+    `force_close_round` outcome (an escape hatch with no real finisher - see
+    that function's docstring), which never doubles."""
+
+    scores: list[int]
+    finisher: int | None
+
+    @classmethod
+    def from_node(cls, node: MatchNode) -> RoundResultOut:
+        assert node.state.round_scores is not None
+        return cls(scores=list(node.state.round_scores), finisher=node.state.finisher)
+
+
 class MatchStateOut(BaseModel):
     match_id: str
     phase: Phase
@@ -111,6 +130,9 @@ class MatchStateOut(BaseModel):
     players_awaiting_final_turn: list[int]
     round_scores: list[int] | None
     total_scores: list[int]
+    # Every round completed so far on the way to this state, oldest first -
+    # see RoundResultOut.
+    round_history: list[RoundResultOut]
     target_score: int
     legal_actions: list[ActionOut]
     status: MatchStatus
@@ -125,6 +147,7 @@ class MatchStateOut(BaseModel):
         player_names: Sequence[str],
         player_types: Sequence[str],
         autoplay_status: AutoplayStatus,
+        round_history: Sequence[MatchNode] = (),
     ) -> MatchStateOut:
         return cls(
             match_id=match_id,
@@ -140,6 +163,7 @@ class MatchStateOut(BaseModel):
             players_awaiting_final_turn=sorted(state.players_awaiting_final_turn),
             round_scores=list(state.round_scores) if state.round_scores is not None else None,
             total_scores=list(state.total_scores),
+            round_history=[RoundResultOut.from_node(n) for n in round_history],
             target_score=state.target_score,
             legal_actions=[ActionOut.from_action(a) for a in legal_actions(state)],
             status=autoplay_status.status,
@@ -163,6 +187,37 @@ class HistoryEdgeOut(BaseModel):
         return cls(kind="action", action_type=action_type_to_name(edge.action.type), position=edge.action.position)
 
 
+def _mcts_decision_summary(mcts_tree: dict | None) -> tuple[float | None, bool | None]:
+    """Two cheap-to-compute signals summarizing a node's recorded search
+    (see `MatchNode.mcts_tree`), read off its finished (highest-visit-count)
+    snapshot - lets the history panel show "how certain was this" and "did
+    search change its mind" per node without shipping the whole tree down the
+    wire.
+
+    `mcts_visit_share`: the chosen (most-visited) action's share of total
+    root visits - 1.0 means every simulation agreed, lower means the search
+    seriously considered an alternative.
+
+    `mcts_prior_overridden`: whether that chosen action differs from the
+    network's own raw top prior - i.e. search's conclusion overrode the
+    network's first instinct rather than just confirming it.
+
+    Both `None` for a node with no recorded search, or a root with no visited
+    edges (can happen for `num_simulations=0`)."""
+    if not mcts_tree:
+        return None, None
+    final = mcts_tree[max(mcts_tree, key=int)]
+    edges = final.get("edges", [])
+    total_visits = sum(e["visit_count"] for e in edges)
+    if not edges or total_visits == 0:
+        return None, None
+    # `tree_to_dict` sorts a decision node's edges by visit_count descending,
+    # so edges[0] is already the chosen action.
+    top_by_visits = edges[0]
+    top_by_prior = max(edges, key=lambda e: e["prior"])
+    return top_by_visits["visit_count"] / total_visits, top_by_visits["action"] != top_by_prior["action"]
+
+
 class HistoryNodeOut(BaseModel):
     node_id: str
     parent_id: str | None
@@ -176,9 +231,13 @@ class HistoryNodeOut(BaseModel):
     # return for this node - lets the history panel show a tree affordance
     # only where one actually exists, without probing every node.
     has_mcts_tree: bool
+    # See `_mcts_decision_summary` above. Both None whenever has_mcts_tree is False.
+    mcts_visit_share: float | None
+    mcts_prior_overridden: bool | None
 
     @classmethod
     def from_node(cls, node: MatchNode) -> HistoryNodeOut:
+        visit_share, prior_overridden = _mcts_decision_summary(node.mcts_tree)
         return cls(
             node_id=node.node_id,
             parent_id=node.parent_id,
@@ -189,6 +248,8 @@ class HistoryNodeOut(BaseModel):
             phase=node.state.phase,
             edge=HistoryEdgeOut.from_edge(node.edge),
             has_mcts_tree=node.mcts_tree is not None,
+            mcts_visit_share=visit_share,
+            mcts_prior_overridden=prior_overridden,
         )
 
 

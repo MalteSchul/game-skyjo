@@ -93,7 +93,7 @@ describe('DecisionDetail', () => {
       />,
     )
 
-    expect(screen.getByText('Place → slot 2', { selector: 'strong' })).toBeInTheDocument()
+    expect(screen.getByText('Place → r1c3', { selector: 'strong' })).toBeInTheDocument()
     expect(screen.getByText('(differs from both)', { selector: 'em' })).toBeInTheDocument()
   })
 
@@ -126,7 +126,7 @@ describe('DecisionDetail', () => {
       />,
     )
 
-    expect(screen.getByText('Flip slot 5', { selector: 'strong' })).toBeInTheDocument()
+    expect(screen.getByText('Flip r2c2', { selector: 'strong' })).toBeInTheDocument()
     expect(screen.getByText('(matches what was played)', { selector: 'em' })).toBeInTheDocument()
   })
 

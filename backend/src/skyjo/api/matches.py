@@ -31,6 +31,21 @@ from skyjo.domain.observation import Turn
 router = APIRouter(prefix="/matches", tags=["matches"])
 store = MatchStore()
 
+
+def _state_out(
+    match_id: str,
+    node: MatchNode,
+    player_names: tuple[str, ...],
+    player_types: tuple[str, ...],
+    status: AutoplayStatus,
+) -> MatchStateOut:
+    """`MatchStateOut.from_state`, plus the round-by-round history behind
+    `node` - a shared spot for that lookup so every endpoint returning a
+    match state includes it, not just the ones someone remembered to wire up
+    by hand."""
+    round_history = store.get_round_history(match_id, node.node_id)
+    return MatchStateOut.from_state(match_id, node.state, player_names, player_types, status, round_history)
+
 # A bot's move is a single `apply_action` call. An all-bot match now plays
 # itself past round boundaries too (see `_run_autoplay_loop`), so this must
 # cover a whole game's worth of rounds to `target_score`, not just one round
@@ -96,14 +111,14 @@ def create_match(request: NewMatchRequest) -> MatchStateOut:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     match_id = store.create(state, player_names, player_types, bots)
     node, player_names, player_types, status = _trigger_and_await(match_id)
-    return MatchStateOut.from_state(match_id, node.state, player_names, player_types, status)
+    return _state_out(match_id, node, player_names, player_types, status)
 
 
 @router.get("/{match_id}", response_model=MatchStateOut)
 def get_match(match_id: str) -> MatchStateOut:
     node, player_names, player_types = _get_head_or_404(match_id)
     status = store.get_status(match_id)
-    return MatchStateOut.from_state(match_id, node.state, player_names, player_types, status)
+    return _state_out(match_id, node, player_names, player_types, status)
 
 
 @router.post("/{match_id}/actions", response_model=MatchStateOut)
@@ -122,7 +137,7 @@ def apply_match_action(match_id: str, request: ActionRequest) -> MatchStateOut:
     except MatchBusyError as exc:
         raise HTTPException(status_code=409, detail="match is busy: a bot is still deciding") from exc
 
-    return MatchStateOut.from_state(match_id, node.state, player_names, player_types, status)
+    return _state_out(match_id, node, player_names, player_types, status)
 
 
 @router.post("/{match_id}/next-round", response_model=MatchStateOut)
@@ -137,7 +152,7 @@ def start_match_next_round(match_id: str) -> MatchStateOut:
     except MatchBusyError as exc:
         raise HTTPException(status_code=409, detail="match is busy: a bot is still deciding") from exc
 
-    return MatchStateOut.from_state(match_id, node.state, player_names, player_types, status)
+    return _state_out(match_id, node, player_names, player_types, status)
 
 
 @router.get("/{match_id}/history/{node_id}/mcts-tree")
@@ -182,7 +197,7 @@ def goto_match_history_node(match_id: str, node_id: str) -> MatchStateOut:
         raise HTTPException(status_code=409, detail="match is busy: a bot is still deciding") from exc
 
     status = store.get_status(match_id)
-    return MatchStateOut.from_state(match_id, node.state, player_names, player_types, status)
+    return _state_out(match_id, node, player_names, player_types, status)
 
 
 def _get_head_or_404(match_id: str) -> tuple[MatchNode, tuple[str, ...], tuple[str, ...]]:

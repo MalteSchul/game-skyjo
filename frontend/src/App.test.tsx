@@ -47,6 +47,7 @@ const INITIAL_FLIP_MATCH: MatchStateOut = {
   players_awaiting_final_turn: [],
   round_scores: null,
   total_scores: [0, 0],
+  round_history: [],
   target_score: 100,
   legal_actions: Array.from({ length: 12 }, (_, i) => ({ type: 'flip_initial' as const, position: i })),
   status: 'idle',
@@ -76,6 +77,8 @@ const ROOT_ONLY_HISTORY: MatchHistoryOut = {
       phase: 'initial_flip',
       edge: { kind: 'root', action_type: null, position: null },
       has_mcts_tree: false,
+      mcts_visit_share: null,
+      mcts_prior_overridden: null,
     },
   ],
 }
@@ -255,7 +258,7 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
     await screen.findByRole('heading', { name: /Player 1/ })
     fireEvent.click(screen.getAllByRole('button', { name: 'face-down card' })[0])
-    await screen.findByText('Player 1 flipped card 1')
+    await screen.findByText('Player 1 flipped r1c1')
 
     fireEvent.click(screen.getByRole('button', { name: 'Game start' }))
 
@@ -287,7 +290,7 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start match' }))
     await screen.findByRole('heading', { name: /Player 1/ })
     fireEvent.click(screen.getAllByRole('button', { name: 'face-down card' })[0])
-    await screen.findByText('Player 1 flipped card 1')
+    await screen.findByText('Player 1 flipped r1c1')
 
     fireEvent.click(screen.getByRole('button', { name: 'Game start' }))
 

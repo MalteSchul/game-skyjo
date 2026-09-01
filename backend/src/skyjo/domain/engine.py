@@ -79,6 +79,12 @@ class GameState:
     # legal_actions()'s awaiting_placement branch for the restriction this
     # enables.
     drawn_card_source: Literal["stock", "discard"] | None = None
+    # 0-indexed count of rounds dealt before this one - only ever set by
+    # _deal_round, and otherwise just carried forward unchanged by every
+    # other transition's replace(state, ...). Drives which seat flips first
+    # this round (see _deal_round) so that always falls to a different
+    # player round over round, instead of seat 0 permanently going first.
+    round_number: int = 0
 
 
 def new_match(player_count: int, seed: int | None = None) -> GameState:
@@ -90,13 +96,15 @@ def new_match(player_count: int, seed: int | None = None) -> GameState:
         )
 
     total_scores = tuple(0 for _ in range(player_count))
-    return _deal_round(total_scores, DEFAULT_TARGET_SCORE, seed)
+    return _deal_round(total_scores, DEFAULT_TARGET_SCORE, seed, round_number=0)
 
 
 def start_next_round(state: GameState) -> GameState:
     if state.phase != "round_over":
         raise IllegalActionError("start_next_round is only valid when phase == 'round_over'")
-    return _deal_round(state.total_scores, state.target_score, state.reshuffle_seed)
+    return _deal_round(
+        state.total_scores, state.target_score, state.reshuffle_seed, round_number=state.round_number + 1
+    )
 
 
 def legal_actions(state: GameState) -> list[Action]:
@@ -173,6 +181,7 @@ def _deal_round(
     total_scores: tuple[int, ...],
     target_score: int,
     reshuffle_seed: int | None,
+    round_number: int,
 ) -> GameState:
     player_count = len(total_scores)
     deal_seed, reshuffle_seed = _advance_seed(reshuffle_seed)
@@ -189,7 +198,10 @@ def _deal_round(
         boards=tuple(boards),
         stock=tuple(deck),
         discard=(top_discard,),
-        current_player=0,
+        # Rotates seat-by-seat each round (round 0 -> seat 0, round 1 -> seat
+        # 1, ...) so whoever flips first - and thereby reveals their cards to
+        # the table before anyone else does - isn't always the same player.
+        current_player=round_number % player_count,
         drawn_card=None,
         finisher=None,
         players_awaiting_final_turn=frozenset(),
@@ -198,6 +210,7 @@ def _deal_round(
         phase="initial_flip",
         reshuffle_seed=reshuffle_seed,
         target_score=target_score,
+        round_number=round_number,
     )
 
 

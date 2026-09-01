@@ -23,6 +23,11 @@ export interface ActionOut {
   position: number | null
 }
 
+export interface RoundResultOut {
+  scores: number[]
+  finisher: number | null
+}
+
 export interface MatchStateOut {
   match_id: string
   phase: Phase
@@ -37,6 +42,7 @@ export interface MatchStateOut {
   players_awaiting_final_turn: number[]
   round_scores: number[] | null
   total_scores: number[]
+  round_history: RoundResultOut[]
   target_score: number
   legal_actions: ActionOut[]
   status: MatchStatus
@@ -77,6 +83,8 @@ export interface HistoryNodeOut {
   phase: Phase
   edge: HistoryEdgeOut
   has_mcts_tree: boolean
+  mcts_visit_share: number | null
+  mcts_prior_overridden: boolean | null
 }
 
 export interface MatchHistoryOut {

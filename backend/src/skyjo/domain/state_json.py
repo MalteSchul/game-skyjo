@@ -47,6 +47,7 @@ def game_state_to_dict(state: GameState) -> dict[str, Any]:
         "reshuffle_seed": state.reshuffle_seed,
         "target_score": state.target_score,
         "drawn_card_source": state.drawn_card_source,
+        "round_number": state.round_number,
     }
 
 
@@ -68,4 +69,9 @@ def game_state_from_dict(data: dict[str, Any]) -> GameState:
         # existed (e.g. scripts/example_states/*.json) - None is the correct
         # read for those anyway, since they predate the restriction it drives.
         drawn_card_source=data.get("drawn_card_source"),
+        # .get, same reasoning: absent in state files dumped before round
+        # rotation existed. 0 is a safe read for those too - it only ever
+        # affects who starts the *next* dealt round, not the state being
+        # loaded here.
+        round_number=data.get("round_number", 0),
     )

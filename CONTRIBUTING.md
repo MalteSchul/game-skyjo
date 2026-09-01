@@ -27,7 +27,7 @@ See `frontend/src/game/deck.test.ts` and `backend/tests/test_deck.py` for the pa
 A piece of work isn't done until all three are true:
 
 1. **Tested** — happy/sad/bad tests added or updated, passing locally and in CI.
-2. **Committed** — clear commit message, no `Co-Authored-By: Claude` (or any AI) trailer, on a feature branch merged via PR.
+2. **Committed** — clear commit message, no `Co-Authored-By:` AI trailer of any kind, on a feature branch merged via PR.
 3. **Deployed** — `docker compose up --build` succeeds from a clean checkout and both services are reachable (frontend loads, `GET /health` on the backend responds, frontend successfully calls the backend). This is the deploy target until a real host is chosen.
 
 ## Local setup

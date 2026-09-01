@@ -129,6 +129,14 @@ class Turn:
     total_scores: tuple[int, ...]
     target_score: int
     legal_actions: tuple[Action, ...]
+    # Not hidden info - which round this is is exactly as public as
+    # total_scores. Carried here specifically so gamestate_from_turn can
+    # rebuild a GameState whose round_number matches reality: a search that
+    # crosses a round boundary (rl.mcts._advance_round_closing) calls
+    # start_next_round, which picks the next round's starting seat from
+    # round_number - get this wrong and search simulates the wrong player
+    # flipping first in the next round instead of the real one.
+    round_number: int
 
     @classmethod
     def from_state(cls, state: GameState) -> Turn:
@@ -150,4 +158,5 @@ class Turn:
             total_scores=state.total_scores,
             target_score=state.target_score,
             legal_actions=actions,
+            round_number=state.round_number,
         )
