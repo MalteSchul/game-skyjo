@@ -8,7 +8,13 @@ from skyjo.domain.engine import Action, ActionType, new_match
 from skyjo.domain.engine import legal_actions as engine_legal_actions
 from skyjo.domain.observation import Turn
 from skyjo.rl.action_space import ACTION_SPACE_SIZE, action_to_index
-from skyjo.rl.selfplay import generate_bot_episode, generate_episode, generate_episodes_batch
+from skyjo.rl.match import build_decider
+from skyjo.rl.selfplay import (
+    generate_bot_episode,
+    generate_episode,
+    generate_episodes_batch,
+    generate_episodes_batch_vs_decider,
+)
 
 
 def _uniform_evaluate(state):
@@ -356,6 +362,98 @@ def test_generate_episodes_batch_rejects_mismatched_rngs_length():
 
     with pytest.raises(ValueError):
         generate_episodes_batch(states, _batch_evaluate, num_simulations=1, rngs=[np.random.default_rng(0)])
+
+
+# --- generate_episodes_batch_vs_decider -------------------------------------
+
+
+def test_generate_episodes_batch_vs_decider_only_records_the_net_seats_decisions():
+    states = [new_match(player_count=2, seed=1), new_match(player_count=2, seed=2)]
+    decider = build_decider("heuristic", [10, 20], num_simulations=1, c_puct=1.5)
+
+    results = generate_episodes_batch_vs_decider(
+        states,
+        _batch_evaluate,
+        decider,
+        net_seats=[0, 1],
+        num_simulations=2,
+        rngs=[np.random.default_rng(0), np.random.default_rng(1)],
+        max_steps=3000,
+        round_max_steps=200,
+        max_rounds=10,
+    )
+
+    assert len(results) == 2
+    for _net_seat, samples in zip([0, 1], results, strict=True):
+        assert len(samples) > 0
+        for sample in samples:
+            assert sample.n_act == 2
+            assert sample.pi.shape == (ACTION_SPACE_SIZE,)
+            assert sample.pi.sum() == pytest.approx(1.0, abs=1e-4)
+        assert sorted(samples[-1].y.tolist()) == [0, 1]
+
+
+def test_generate_episodes_batch_vs_decider_matches_generate_episode_vs_bot_played_solo():
+    # Same equivalence property as generate_episodes_batch vs generate_episode
+    # one level up, but for the vs-decider path: playing concurrently via a
+    # SimpleDecider must reproduce exactly what generate_episode_vs_bot (a
+    # plain choose_action callable) produces alone with the same seed.
+    from skyjo.rl.selfplay import generate_episode_vs_bot
+
+    state = new_match(player_count=2, seed=1)
+    bot = HeuristicBot(seed=99)
+    solo = generate_episode_vs_bot(
+        state, _uniform_evaluate, bot.choose_action, net_seat=0, num_simulations=2,
+        rng=np.random.default_rng(5), max_steps=3000, round_max_steps=200, max_rounds=10,
+    )
+
+    decider = build_decider("heuristic", [99], num_simulations=1, c_puct=1.5)
+    batched = generate_episodes_batch_vs_decider(
+        [state], _batch_evaluate, decider, net_seats=[0], num_simulations=2,
+        rngs=[np.random.default_rng(5)], max_steps=3000, round_max_steps=200, max_rounds=10,
+    )[0]
+
+    assert [s.pi.tolist() for s in batched] == [s.pi.tolist() for s in solo]
+    assert [s.y.tolist() for s in batched] == [s.y.tolist() for s in solo]
+
+
+def test_generate_episodes_batch_vs_decider_with_no_games_returns_an_empty_list():
+    decider = build_decider("heuristic", [], num_simulations=1, c_puct=1.5)
+
+    assert generate_episodes_batch_vs_decider([], _batch_evaluate, decider, net_seats=[], num_simulations=2) == []
+
+
+# --- generate_episodes_batch_vs_decider: bad path ---------------------------
+
+
+def test_generate_episodes_batch_vs_decider_raises_if_a_game_does_not_finish_within_max_steps():
+    states = [new_match(player_count=2, seed=1)]
+    decider = build_decider("heuristic", [10], num_simulations=1, c_puct=1.5)
+
+    with pytest.raises(RuntimeError):
+        generate_episodes_batch_vs_decider(
+            states, _batch_evaluate, decider, net_seats=[0], num_simulations=1,
+            rngs=[np.random.default_rng(0)], max_steps=1,
+        )
+
+
+def test_generate_episodes_batch_vs_decider_rejects_mismatched_net_seats_length():
+    states = [new_match(player_count=2, seed=1), new_match(player_count=2, seed=2)]
+    decider = build_decider("heuristic", [10, 20], num_simulations=1, c_puct=1.5)
+
+    with pytest.raises(ValueError):
+        generate_episodes_batch_vs_decider(states, _batch_evaluate, decider, net_seats=[0], num_simulations=1)
+
+
+def test_generate_episodes_batch_vs_decider_rejects_mismatched_rngs_length():
+    states = [new_match(player_count=2, seed=1), new_match(player_count=2, seed=2)]
+    decider = build_decider("heuristic", [10, 20], num_simulations=1, c_puct=1.5)
+
+    with pytest.raises(ValueError):
+        generate_episodes_batch_vs_decider(
+            states, _batch_evaluate, decider, net_seats=[0, 1], num_simulations=1,
+            rngs=[np.random.default_rng(0)],
+        )
 
 
 # --- generate_bot_episode --------------------------------------------------

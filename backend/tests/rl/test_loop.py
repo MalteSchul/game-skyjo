@@ -9,9 +9,10 @@ import torch
 import skyjo.rl.loop as loop_module
 from skyjo.domain.engine import new_match
 from skyjo.rl.action_space import ACTION_SPACE_SIZE
-from skyjo.rl.checkpoint import load_checkpoint
+from skyjo.rl.checkpoint import load_checkpoint, save_checkpoint
 from skyjo.rl.evaluator import HeuristicEvalResult
-from skyjo.rl.loop import LoopState, TrainingConfig, run_training_loop
+from skyjo.rl.loop import LoopState, TrainingConfig, run_training_loop, sample_pool_checkpoint
+from skyjo.rl.match import MatchEvalResult
 from skyjo.rl.metrics import MetricsLogger
 from skyjo.rl.network import AlphaZeroNet
 from skyjo.rl.selfplay import ReplaySample
@@ -67,11 +68,30 @@ def test_training_config_accepts_valid_values():
         {"eval_every": 0},
         {"eval_games": 0},
         {"eval_num_simulations": -1},
+        {"opponent_pool_prob": -0.1},
+        {"opponent_pool_prob": 1.1},
+        {"opponent_pool_window": 0},
+        {"opponent_pool_num_simulations": -1},
     ],
 )
 def test_training_config_rejects_invalid_values(overrides):
     with pytest.raises(ValueError):
         _tiny_config(**overrides)
+
+
+def test_training_config_rejects_opponent_pool_prob_with_non_two_player():
+    with pytest.raises(ValueError):
+        _tiny_config(opponent_pool_prob=0.5, min_players=2, max_players=3)
+
+
+def test_training_config_accepts_zero_opponent_pool_prob_with_non_two_player():
+    config = _tiny_config(opponent_pool_prob=0.0, min_players=2, max_players=3)
+    assert config.opponent_pool_prob == 0.0
+
+
+def test_training_config_rejects_eval_checkpoint_path_with_non_two_player():
+    with pytest.raises(ValueError):
+        _tiny_config(eval_checkpoint_path="some/checkpoint.pt", min_players=2, max_players=3)
 
 
 def test_training_config_rejects_unknown_selfplay_opponent():
@@ -560,6 +580,146 @@ def test_run_training_loop_vs_random_produces_samples_and_trains(tmp_path):
     record = json.loads((tmp_path / "logs" / "metrics.jsonl").read_text().splitlines()[0])
     assert record["self_play/failed_games"] == 0
     assert record["self_play/samples_generated"] > 0
+
+
+# --- sample_pool_checkpoint --------------------------------------------------
+
+
+def test_sample_pool_checkpoint_returns_none_when_the_directory_has_no_checkpoints(tmp_path):
+    assert sample_pool_checkpoint(str(tmp_path), window=10, rng=np.random.default_rng(0)) is None
+
+
+def test_sample_pool_checkpoint_only_draws_from_the_most_recent_window(tmp_path):
+    net = AlphaZeroNet(trunk_dim=8, num_residual_blocks=1)
+    for iteration in range(1, 6):
+        save_checkpoint(tmp_path / f"checkpoint_{iteration:06d}.pt", net, None, iteration=iteration, total_train_steps=0)
+    # A non-matching file (latest.pt) must never be picked.
+    save_checkpoint(tmp_path / "latest.pt", net, None, iteration=5, total_train_steps=0)
+
+    rng = np.random.default_rng(0)
+    seen = {sample_pool_checkpoint(str(tmp_path), window=2, rng=rng) for _ in range(30)}
+
+    assert seen == {str(tmp_path / "checkpoint_000004.pt"), str(tmp_path / "checkpoint_000005.pt")}
+
+
+# --- run_training_loop: opponent pool self-play ------------------------------
+
+
+def test_run_training_loop_opponent_pool_prob_zero_never_samples_the_pool(tmp_path, monkeypatch):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("sample_pool_checkpoint should never be called when opponent_pool_prob is 0.0")
+
+    monkeypatch.setattr(loop_module, "sample_pool_checkpoint", fail_if_called)
+    config = _tiny_config(checkpoint_dir=str(tmp_path / "checkpoints"), iterations=2)
+
+    with MetricsLogger(tmp_path / "logs") as metrics:
+        _, final_state = run_training_loop(config, metrics)
+
+    assert final_state.iteration == 2
+
+
+def test_run_training_loop_falls_back_to_self_when_no_pool_checkpoint_exists_yet(tmp_path, monkeypatch):
+    # opponent_pool_prob=1.0 always wants the pool, but a fresh run's
+    # checkpoint_dir starts empty - the very first iteration has nothing to
+    # sample yet, so it must fall back to ordinary self-play rather than error.
+    calls = []
+    monkeypatch.setattr(loop_module, "generate_episodes_batch_vs_decider", lambda *a, **k: calls.append(1))
+    config = _tiny_config(
+        checkpoint_dir=str(tmp_path / "checkpoints"), opponent_pool_prob=1.0, games_per_iteration=1, iterations=1,
+    )
+
+    with MetricsLogger(tmp_path / "logs") as metrics:
+        _, final_state = run_training_loop(config, metrics)
+
+    assert calls == []
+    assert final_state.iteration == 1
+
+
+def test_run_training_loop_uses_the_pool_opponent_once_a_checkpoint_exists(tmp_path):
+    net_kwargs = {"trunk_dim": 8, "num_residual_blocks": 1}
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    save_checkpoint(
+        checkpoint_dir / "checkpoint_000001.pt", AlphaZeroNet(**net_kwargs), None, iteration=1, total_train_steps=0,
+    )
+    config = _tiny_config(
+        network_kwargs=net_kwargs, checkpoint_dir=str(checkpoint_dir), opponent_pool_prob=1.0,
+        opponent_pool_window=5, games_per_iteration=2, iterations=1,
+    )
+
+    with MetricsLogger(tmp_path / "logs") as metrics:
+        _, final_state = run_training_loop(config, metrics)
+
+    assert final_state.iteration == 1
+    record = json.loads((tmp_path / "logs" / "metrics.jsonl").read_text().splitlines()[0])
+    assert record["self_play/failed_games"] == 0
+    assert record["self_play/samples_generated"] > 0
+
+
+# --- run_training_loop: fixed-checkpoint eval --------------------------------
+
+
+def test_run_training_loop_does_not_evaluate_vs_checkpoint_by_default(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(loop_module, "evaluate_vs_decider", lambda *a, **k: calls.append(1))
+    config = _tiny_config(iterations=1, eval_every=1)
+
+    with MetricsLogger(tmp_path / "logs") as metrics:
+        run_training_loop(config, metrics)
+
+    assert calls == []
+
+
+def test_run_training_loop_logs_eval_metrics_vs_checkpoint_when_configured(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_eval(net, checkpoint_path, num_games, **kwargs):
+        calls.append((checkpoint_path, num_games, kwargs))
+        return MatchEvalResult(games_played=num_games, win_rate=0.4, avg_rank=0.6, avg_points=30.0)
+
+    monkeypatch.setattr(loop_module, "evaluate_vs_decider", fake_eval)
+    config = _tiny_config(iterations=1, eval_every=1, eval_games=5, eval_checkpoint_path="some/checkpoint.pt")
+
+    with MetricsLogger(tmp_path / "logs") as metrics:
+        run_training_loop(config, metrics)
+
+    assert len(calls) == 1
+    checkpoint_path, num_games, _kwargs = calls[0]
+    assert checkpoint_path == "some/checkpoint.pt"
+    assert num_games == 5
+
+    lines = [json.loads(line) for line in (tmp_path / "logs" / "metrics.jsonl").read_text().splitlines()]
+    eval_records = [line for line in lines if "eval/win_rate_vs_checkpoint" in line]
+    assert len(eval_records) == 1
+    assert eval_records[0]["eval/win_rate_vs_checkpoint"] == 0.4
+    assert eval_records[0]["eval/avg_rank_vs_checkpoint"] == 0.6
+    assert eval_records[0]["eval/avg_points_vs_checkpoint"] == 30.0
+    # win_rate_vs_heuristic must still be logged alongside it, unaffected.
+    assert "eval/win_rate_vs_heuristic" in eval_records[0]
+
+
+def test_run_training_loop_gate_on_eval_ignores_the_checkpoint_eval_result(tmp_path, monkeypatch):
+    # gate_on_eval must stay anchored to win_rate_vs_heuristic - a poor
+    # win_rate_vs_checkpoint (a much stronger fixed opponent, say) should
+    # never by itself cause a good heuristic-beating update to be rejected.
+    monkeypatch.setattr(
+        loop_module,
+        "evaluate_vs_heuristic",
+        lambda *a, **k: HeuristicEvalResult(games_played=1, win_rate=0.9, avg_rank=0.0, avg_points=0.0),
+    )
+    monkeypatch.setattr(
+        loop_module,
+        "evaluate_vs_decider",
+        lambda *a, **k: MatchEvalResult(games_played=1, win_rate=0.0, avg_rank=1.0, avg_points=100.0),
+    )
+    config = _tiny_config(iterations=1, eval_every=1, gate_on_eval=True, eval_checkpoint_path="some/checkpoint.pt")
+
+    with MetricsLogger(tmp_path / "logs") as metrics:
+        run_training_loop(config, metrics)
+
+    lines = [json.loads(line) for line in (tmp_path / "logs" / "metrics.jsonl").read_text().splitlines()]
+    gate_record = next(line for line in lines if "eval/gate_accepted" in line)
+    assert gate_record["eval/gate_accepted"] == 1.0
 
 
 def test_run_training_loop_batched_selfplay_survives_a_whole_group_failing(tmp_path, monkeypatch):
