@@ -20,6 +20,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -38,6 +39,14 @@ from skyjo.rl.mcts import (
     sample_action,
     visit_distribution,
 )
+
+if TYPE_CHECKING:
+    # Deferred: rl.match imports selfplay's own DEFAULT_MAX_STEPS/final_ranks
+    # etc at module load time, so a module-level import in the other
+    # direction here would be circular. Only the type hint needs this at
+    # all - generate_episodes_batch_vs_decider imports decide_batch lazily,
+    # inside the function body, once both modules are fully loaded.
+    from skyjo.rl.match import Decider
 
 DEFAULT_MAX_STEPS = 5000
 # Disabled by default (effectively infinite): rounds/games now run to their
@@ -383,6 +392,144 @@ def generate_episodes_batch(
         )
 
     results = []
+    for i in range(n):
+        y = np.asarray(final_ranks(states[i].total_scores), dtype=np.int64)
+        points_y = final_points(states[i].total_scores, states[i].target_score)
+        results.append(
+            [
+                ReplaySample(state=s, n_act=n_acts[i], pi=pi_vector, y=y, points_y=points_y)
+                for s, pi_vector in pending[i]
+            ]
+        )
+        if round_stats_sink is not None:
+            round_stats_sink.append((round_counts[i], tuple(int(s) for s in states[i].total_scores)))
+    return results
+
+
+def generate_episodes_batch_vs_decider(
+    initial_states: Sequence[GameState],
+    evaluate_batch: BatchEvaluateFn,
+    decider: Decider,
+    net_seats: Sequence[int],
+    *,
+    num_simulations: int,
+    tau_schedule: Callable[[int], float] | float = 1.0,
+    c_puct: float = DEFAULT_C_PUCT,
+    dirichlet_alpha: float = DEFAULT_DIRICHLET_ALPHA,
+    dirichlet_epsilon: float = DEFAULT_DIRICHLET_EPSILON,
+    rngs: Sequence[np.random.Generator] | None = None,
+    max_steps: int = DEFAULT_MAX_STEPS,
+    round_max_steps: int = DEFAULT_ROUND_MAX_STEPS,
+    max_rounds: int = DEFAULT_MAX_ROUNDS,
+    round_stats_sink: list[tuple[int, tuple[int, ...]]] | None = None,
+) -> list[list[ReplaySample]]:
+    """Batched sibling of `generate_episode_vs_bot`, generalized the same way
+    `generate_episodes_batch` generalizes `generate_episode`: plays
+    `len(initial_states)` 2-player games concurrently, batching every
+    decision round's `net_seats[i]`-side leaf evaluations into one
+    `evaluate_batch` call via `run_mcts_batch` - exactly like pure self-play -
+    while the other seat's moves come from `decider` (an `rl.match.Decider`),
+    batched into its own single call per round via `rl.match.decide_batch`.
+
+    Only each game's `net_seats[i]` side is recorded: root noise, tau-sampled
+    action, and `domain.action_equivalence.tied_actions` widening all apply
+    exactly as in `generate_episode_vs_bot`. `decider`'s side plays greedily
+    with no root noise (see `rl.match`'s module docstring for why) and
+    produces no `ReplaySample` - it was never scored by `evaluate_batch`, so
+    there's no `pi` search target to record for it.
+
+    Exists so self-play data can be generated against a pool of the net's own
+    past checkpoints instead of always its current self - see
+    `rl.loop.TrainingConfig.opponent_pool_prob`.
+    """
+    # deferred - see this module's TYPE_CHECKING import for why
+    from skyjo.rl.match import decide_batch
+
+    n = len(initial_states)
+    if n == 0:
+        return []
+    net_seats = list(net_seats)
+    if len(net_seats) != n:
+        raise ValueError("generate_episodes_batch_vs_decider: net_seats must be the same length as initial_states")
+    rngs = list(rngs) if rngs is not None else [np.random.default_rng() for _ in range(n)]
+    if len(rngs) != n:
+        raise ValueError("generate_episodes_batch_vs_decider: rngs must be the same length as initial_states")
+
+    states = list(initial_states)
+    n_acts = [len(s.boards) for s in states]
+    pending: list[list[tuple[GameState, np.ndarray]]] = [[] for _ in range(n)]
+    finished = [False] * n
+    steps = [0] * n
+    round_steps = [0] * n
+    round_counts = [0] * n
+
+    for _ in range(max_steps):
+        for i in range(n):
+            if finished[i]:
+                continue
+            while True:
+                if states[i].phase == "round_over":
+                    round_counts[i] += 1
+                    if round_counts[i] >= max_rounds:
+                        finished[i] = True
+                        break
+                    states[i] = start_next_round(states[i])
+                    round_steps[i] = 0
+                    continue
+                if states[i].phase == "game_over":
+                    finished[i] = True
+                    break
+                if round_steps[i] >= round_max_steps:
+                    states[i] = force_close_round(states[i])
+                    round_steps[i] = 0
+                    continue
+                break
+
+        active = [i for i in range(n) if not finished[i]]
+        if not active:
+            break
+
+        turns = {i: Turn.from_state(states[i]) for i in active}
+        net_active = [i for i in active if turns[i].acting_player == net_seats[i]]
+        decider_active = [i for i in active if turns[i].acting_player != net_seats[i]]
+
+        if decider_active:
+            decider_turns = [turns[i] for i in decider_active]
+            decider_rngs = [rngs[i] for i in decider_active]
+            decider_actions = decide_batch(decider, decider_active, decider_turns, decider_rngs)
+            for i, action in zip(decider_active, decider_actions, strict=True):
+                states[i] = apply_action(states[i], action)
+                round_steps[i] += 1
+
+        if net_active:
+            net_turns = [turns[i] for i in net_active]
+            taus = [tau_schedule(steps[i]) if callable(tau_schedule) else tau_schedule for i in net_active]
+            roots = run_mcts_batch(
+                net_turns,
+                evaluate_batch,
+                num_simulations=num_simulations,
+                c_puct=c_puct,
+                dirichlet_alpha=dirichlet_alpha,
+                dirichlet_epsilon=dirichlet_epsilon,
+                rngs=[rngs[i] for i in net_active],
+            )
+            for slot, i in enumerate(net_active):
+                pi = visit_distribution(roots[slot], tau=taus[slot])
+                pending[i].append((states[i], pi_to_vector(pi)))
+                representative = sample_action(pi, rngs[i])
+                group = tied_actions(net_turns[slot], representative)
+                action = group[rngs[i].integers(len(group))] if len(group) > 1 else representative
+                states[i] = apply_action(states[i], action)
+                steps[i] += 1
+                round_steps[i] += 1
+    else:
+        unfinished = sum(1 for f in finished if not f)
+        raise RuntimeError(
+            f"generate_episodes_batch_vs_decider: {unfinished} of {n} games did not reach game_over "
+            f"within {max_steps} decision rounds"
+        )
+
+    results: list[list[ReplaySample]] = []
     for i in range(n):
         y = np.asarray(final_ranks(states[i].total_scores), dtype=np.int64)
         points_y = final_points(states[i].total_scores, states[i].target_score)

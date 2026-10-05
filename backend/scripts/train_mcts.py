@@ -177,6 +177,52 @@ def _parse_args() -> argparse.Namespace:
         "many games' concurrent leaf evaluations into one call - the eval-time counterpart to "
         "--selfplay-batch-size.",
     )
+    parser.add_argument(
+        "--eval-checkpoint",
+        default=None,
+        help="path to a fixed checkpoint to also eval against (alongside the heuristic-eval above) at "
+        "every --eval-every boundary - see rl.match.evaluate_vs_decider. Unlike the heuristic bot, "
+        "this reference point doesn't get easier relative to the net over the run, so it stays a "
+        "meaningful signal after win_rate_vs_heuristic saturates near 100%% - until the net "
+        "similarly surpasses this checkpoint too, at which point pick a later one.",
+    )
+    parser.add_argument(
+        "--eval-checkpoint-num-simulations",
+        type=int,
+        default=None,
+        help="MCTS simulations for --eval-checkpoint's eval (default: unset, reuses --eval-num-simulations). "
+        "Worth setting lower than --eval-num-simulations: unlike the heuristic eval, both sides here "
+        "run a real search with no --eval-workers to parallelize across, so it's roughly an order of "
+        "magnitude slower wall-clock at the same simulation count.",
+    )
+    parser.add_argument(
+        "--opponent-pool-prob",
+        type=float,
+        default=0.0,
+        help="0.0 (default) = unchanged self-play behavior. >0.0: each iteration independently has "
+        "this probability of instead playing the live net against a frozen net loaded from a "
+        "checkpoint sampled from the pool - see rl.loop.TrainingConfig.opponent_pool_prob. Falls "
+        "back to ordinary self-play if no checkpoint exists yet (e.g. iteration 1 of a fresh run).",
+    )
+    parser.add_argument(
+        "--opponent-pool-window",
+        type=int,
+        default=100,
+        help="only the most recent this-many numbered checkpoints are eligible pool opponents.",
+    )
+    parser.add_argument(
+        "--opponent-pool-checkpoint-dir",
+        default=None,
+        help="directory to draw pool opponents from (default: unset, reuses --checkpoint-dir/--run-dir's "
+        "own checkpoints - the run's own recent past is the natural pool).",
+    )
+    parser.add_argument(
+        "--opponent-pool-num-simulations",
+        type=int,
+        default=None,
+        help="MCTS simulations for the frozen pool opponent's own search (default: unset, reuses "
+        "--num-simulations - an equally-searched sparring partner).",
+    )
     return parser.parse_args()
 
 
@@ -234,6 +280,12 @@ def main() -> None:
         eval_num_simulations=args.eval_num_simulations,
         eval_workers=args.eval_workers,
         eval_batch_size=args.eval_batch_size,
+        eval_checkpoint_path=args.eval_checkpoint,
+        eval_checkpoint_num_simulations=args.eval_checkpoint_num_simulations,
+        opponent_pool_prob=args.opponent_pool_prob,
+        opponent_pool_window=args.opponent_pool_window,
+        opponent_pool_checkpoint_dir=args.opponent_pool_checkpoint_dir,
+        opponent_pool_num_simulations=args.opponent_pool_num_simulations,
     )
     print(f"self-play concurrency: workers={workers} selfplay_batch_size={selfplay_batch_size}")
 

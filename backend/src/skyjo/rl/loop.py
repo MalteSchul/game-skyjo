@@ -24,6 +24,7 @@ from __future__ import annotations
 import copy
 import multiprocessing
 import pickle
+import re
 import time
 import traceback
 from collections.abc import Sequence
@@ -44,6 +45,7 @@ from skyjo.rl.evaluator import (
     make_batch_network_evaluator,
     make_network_evaluator,
 )
+from skyjo.rl.match import build_decider, evaluate_vs_decider
 from skyjo.rl.mcts import (
     DEFAULT_C_PUCT,
     DEFAULT_DIRICHLET_ALPHA,
@@ -62,6 +64,7 @@ from skyjo.rl.selfplay import (
     generate_episode,
     generate_episode_vs_bot,
     generate_episodes_batch,
+    generate_episodes_batch_vs_decider,
 )
 from skyjo.rl.train import (
     DEFAULT_L2_COEF,
@@ -70,6 +73,12 @@ from skyjo.rl.train import (
     collate_batch,
     training_step,
 )
+
+# Matches save_checkpoint's own f"checkpoint_{iteration:06d}.pt" naming -
+# see rl.checkpoint.save_checkpoint - so the pool can recover each
+# checkpoint's iteration number straight from its filename instead of
+# needing a separate index file.
+_POOL_CHECKPOINT_RE = re.compile(r"checkpoint_(\d+)\.pt$")
 
 
 @dataclass(frozen=True)
@@ -184,6 +193,62 @@ class TrainingConfig:
     # the first iteration happens to produce as the new bar. 0.0 (default)
     # accepts the first eval unconditionally, same as having no prior floor.
     gate_initial_best_win_rate: float = 0.0
+    # Additional per-iteration opponent for self-play, layered on top of
+    # `selfplay_opponent` above rather than replacing it: 0.0 (default) never
+    # fires, so every iteration proceeds exactly as `selfplay_opponent`
+    # already dictates - fully backward compatible. > 0.0 means each
+    # iteration independently has this probability of instead playing the
+    # *live* net against a *frozen* net loaded from a checkpoint sampled
+    # uniformly from the most recent `opponent_pool_window` numbered
+    # checkpoints already written to `opponent_pool_checkpoint_dir` (or
+    # `checkpoint_dir` if that's unset) - see `rl.selfplay
+    # .generate_episodes_batch_vs_decider`. Only the live net's own decisions
+    # are recorded as training samples; the frozen opponent's aren't (same
+    # asymmetry as `selfplay_opponent in ("heuristic", "random")`). Falls
+    # back to whatever `selfplay_opponent` says for that iteration if no
+    # checkpoint exists yet (e.g. before iteration 1 of a fresh run) or if
+    # `opponent_pool_checkpoint_dir`/`checkpoint_dir` are both unset.
+    opponent_pool_prob: float = 0.0
+    # Only the most recent this-many numbered checkpoints are eligible
+    # opponents - keeps the pool a *recent* past self, not diluted by every
+    # checkpoint an entire run has ever produced (many of which may be far
+    # weaker than the current net and teach it nothing).
+    opponent_pool_window: int = 100
+    # None (default) = reuse checkpoint_dir (the run's own checkpoints are
+    # the natural pool). Set this to draw from a different/external
+    # directory of checkpoints instead.
+    opponent_pool_checkpoint_dir: str | None = None
+    # None (default) = reuse num_simulations, giving the frozen opponent the
+    # same search budget as the live net (a fair sparring partner, and both
+    # sides are searched nets either way - see rl.match's module docstring on
+    # why this doesn't cost self-play's batching benefit). Set lower to bound
+    # the extra per-iteration compute of a pool opponent's own search.
+    opponent_pool_num_simulations: int | None = None
+    # None (default) = no fixed-checkpoint eval. Otherwise, every eval_every
+    # iterations (alongside evaluate_vs_heuristic above), also plays
+    # eval_games games of this iteration's net vs the fixed checkpoint at
+    # this path and logs win_rate/avg_rank/avg_points under the
+    # "eval/*_vs_checkpoint" prefix (see `rl.match.evaluate_vs_decider`).
+    # Unlike win_rate_vs_heuristic, this reference point doesn't move, so it
+    # stays a meaningful signal even after the net starts always beating the
+    # heuristic bot - until the net similarly surpasses this checkpoint too,
+    # at which point it saturates the same way and needs manually swapping
+    # to a later one. Reuses eval_games/eval_batch_size - no separate knobs
+    # for those, since this is the same kind of periodic diagnostic as the
+    # heuristic eval it runs alongside (eval_workers is not reused either:
+    # evaluate_vs_decider has no multiprocess sharding yet, see its
+    # docstring). eval_num_simulations *is* overridable below, though - see
+    # eval_checkpoint_num_simulations.
+    eval_checkpoint_path: str | None = None
+    # None (default) = reuse eval_num_simulations, same as every other
+    # knob above. Worth overriding independently because this eval, unlike
+    # evaluate_vs_heuristic, runs a real MCTS search on *both* sides (the
+    # heuristic bot doesn't search at all) with no workers to parallelize
+    # across - roughly an order of magnitude slower wall-clock than the
+    # heuristic eval at the same simulation count in practice, so lowering
+    # just this one is the cheapest way to bring that back down without
+    # also cutting the heuristic eval's own (already-cheap) fidelity.
+    eval_checkpoint_num_simulations: int | None = None
 
     def __post_init__(self) -> None:
         if self.iterations <= 0:
@@ -237,6 +302,18 @@ class TrainingConfig:
             raise ValueError("TrainingConfig: gate_on_eval requires eval_every to be set")
         if self.gate_tolerance < 0:
             raise ValueError("TrainingConfig: gate_tolerance must be >= 0")
+        if not (0.0 <= self.opponent_pool_prob <= 1.0):
+            raise ValueError("TrainingConfig: opponent_pool_prob must be between 0.0 and 1.0")
+        if self.opponent_pool_window <= 0:
+            raise ValueError("TrainingConfig: opponent_pool_window must be > 0")
+        if self.opponent_pool_prob > 0.0 and not (self.min_players == self.max_players == 2):
+            raise ValueError("TrainingConfig: opponent_pool_prob > 0 requires min_players == max_players == 2")
+        if self.opponent_pool_num_simulations is not None and self.opponent_pool_num_simulations < 0:
+            raise ValueError("TrainingConfig: opponent_pool_num_simulations must be >= 0 if given")
+        if self.eval_checkpoint_path is not None and not (self.min_players == self.max_players == 2):
+            raise ValueError("TrainingConfig: eval_checkpoint_path requires min_players == max_players == 2")
+        if self.eval_checkpoint_num_simulations is not None and self.eval_checkpoint_num_simulations < 0:
+            raise ValueError("TrainingConfig: eval_checkpoint_num_simulations must be >= 0 if given")
 
 
 @dataclass
@@ -668,6 +745,177 @@ def run_self_play_iteration_vs_bot(
     return samples, failed_games, round_stats
 
 
+def _list_pool_checkpoints(pool_dir: str) -> list[tuple[int, str]]:
+    """Every `checkpoint_NNNNNN.pt` in `pool_dir`, as `(iteration, path)`,
+    sorted by iteration ascending. Ignores `latest.pt` and anything else that
+    doesn't match `save_checkpoint`'s own naming convention."""
+    found = []
+    for path in Path(pool_dir).glob("checkpoint_*.pt"):
+        match = _POOL_CHECKPOINT_RE.search(path.name)
+        if match:
+            found.append((int(match.group(1)), str(path)))
+    return sorted(found)
+
+
+def sample_pool_checkpoint(pool_dir: str, window: int, rng: np.random.Generator) -> str | None:
+    """Uniformly samples one checkpoint path from the most recent `window`
+    numbered checkpoints in `pool_dir` - `None` if none exist yet (e.g.
+    before a fresh run's first checkpoint has been written)."""
+    checkpoints = _list_pool_checkpoints(pool_dir)
+    if not checkpoints:
+        return None
+    candidates = checkpoints[-window:]
+    return candidates[int(rng.integers(len(candidates)))][1]
+
+
+@dataclass(frozen=True)
+class _SelfPlayPoolJob:
+    seeds: tuple[int, ...]
+    net_seats: tuple[int, ...]
+    opponent_checkpoint_path: str
+    opponent_num_simulations: int
+    network_kwargs: dict[str, Any]
+    num_simulations: int
+    tau: float
+    c_puct: float
+    dirichlet_alpha: float
+    dirichlet_epsilon: float
+    max_steps: int
+    round_max_steps: int
+    max_rounds: int
+    failure_log_path: str
+
+
+def _log_pool_failure(job: _SelfPlayPoolJob, exc: Exception) -> None:
+    summary = (
+        f"_play_pool_batch_of_games: seeds={job.seeds} opponent={job.opponent_checkpoint_path} "
+        f"failed, skipping: {exc}"
+    )
+    print(summary)
+    with open(job.failure_log_path, "a", encoding="utf-8") as f:
+        f.write(f"--- {datetime.now(UTC).isoformat()} {summary}\n")
+        f.write(traceback.format_exc())
+        f.write("\n")
+
+
+def _play_pool_batch_of_games(
+    job: _SelfPlayPoolJob,
+) -> tuple[list[ReplaySample], list[tuple[int, tuple[int, ...]]]]:
+    """Same failure-isolation contract as `_play_batch_of_games` (a failure
+    here takes down the whole group, not just one game) - see its docstring.
+    Builds its own opponent `Decider` from `job.opponent_checkpoint_path`
+    every call rather than once per iteration: workers are re-spawned every
+    iteration anyway (see this module's docstring), so there's no long-lived
+    place to cache it, and a checkpoint load is cheap next to the self-play
+    search itself.
+    """
+    if _worker_evaluate_batch is None:
+        raise RuntimeError("_play_pool_batch_of_games: worker was not initialized via _init_worker")
+    initial_states = [new_match(player_count=2, seed=seed) for seed in job.seeds]
+    rngs = [np.random.default_rng(seed) for seed in job.seeds]
+    decider = build_decider(
+        job.opponent_checkpoint_path,
+        list(job.seeds),
+        num_simulations=job.opponent_num_simulations,
+        c_puct=job.c_puct,
+        network_kwargs=job.network_kwargs,
+    )
+    round_stats: list[tuple[int, tuple[int, ...]]] = []
+    try:
+        results = generate_episodes_batch_vs_decider(
+            initial_states,
+            _worker_evaluate_batch,
+            decider,
+            job.net_seats,
+            num_simulations=job.num_simulations,
+            tau_schedule=job.tau,
+            c_puct=job.c_puct,
+            dirichlet_alpha=job.dirichlet_alpha,
+            dirichlet_epsilon=job.dirichlet_epsilon,
+            rngs=rngs,
+            max_steps=job.max_steps,
+            round_max_steps=job.round_max_steps,
+            max_rounds=job.max_rounds,
+            round_stats_sink=round_stats,
+        )
+    except Exception as exc:  # noqa: BLE001 - deliberately blind, see _play_one_game's docstring
+        _log_pool_failure(job, exc)
+        return [], []
+    return [sample for game_samples in results for sample in game_samples], round_stats
+
+
+def _build_pool_jobs(
+    config: TrainingConfig,
+    rng: np.random.Generator,
+    failure_log_path: str,
+    opponent_checkpoint_path: str,
+) -> list[_SelfPlayPoolJob]:
+    seeds = rng.integers(0, 2**31 - 1, size=config.games_per_iteration)
+    batch_size = config.selfplay_batch_size
+    opponent_num_simulations = (
+        config.opponent_pool_num_simulations
+        if config.opponent_pool_num_simulations is not None
+        else config.num_simulations
+    )
+    jobs = []
+    for start in range(0, config.games_per_iteration, batch_size):
+        chunk = seeds[start : start + batch_size]
+        jobs.append(
+            _SelfPlayPoolJob(
+                seeds=tuple(int(s) for s in chunk),
+                net_seats=tuple((start + i) % 2 for i in range(len(chunk))),
+                opponent_checkpoint_path=opponent_checkpoint_path,
+                opponent_num_simulations=opponent_num_simulations,
+                network_kwargs=config.network_kwargs,
+                num_simulations=config.num_simulations,
+                tau=config.tau,
+                c_puct=config.c_puct,
+                dirichlet_alpha=config.dirichlet_alpha,
+                dirichlet_epsilon=config.dirichlet_epsilon,
+                max_steps=config.max_steps_per_episode,
+                round_max_steps=config.round_max_steps,
+                max_rounds=config.max_rounds,
+                failure_log_path=failure_log_path,
+            )
+        )
+    return jobs
+
+
+def run_self_play_iteration_vs_pool(
+    net: AlphaZeroNet, config: TrainingConfig, jobs: list[_SelfPlayPoolJob]
+) -> tuple[list[ReplaySample], int, list[tuple[int, tuple[int, ...]]]]:
+    """`opponent_pool_prob` sibling of `run_self_play_iteration_batched`: each
+    job plays a whole group of games concurrently against the same frozen
+    opponent checkpoint, batched via `generate_episodes_batch_vs_decider`.
+    `workers` shards jobs (groups) across processes exactly as the other
+    self-play paths do.
+    """
+    state_dict = {k: v.detach().cpu() for k, v in net.state_dict().items()}
+
+    if config.workers <= 1:
+        _init_worker(state_dict, config.network_kwargs)
+        group_results = [_play_pool_batch_of_games(job) for job in jobs]
+    else:
+        with ProcessPoolExecutor(
+            max_workers=config.workers,
+            initializer=_init_worker,
+            initargs=(state_dict, config.network_kwargs),
+            mp_context=_MP_SPAWN_CONTEXT,
+        ) as pool:
+            group_results = list(pool.map(_play_pool_batch_of_games, jobs))
+
+    samples: list[ReplaySample] = []
+    failed_games = 0
+    round_stats: list[tuple[int, tuple[int, ...]]] = []
+    for job, (group_samples, group_round_stats) in zip(jobs, group_results, strict=True):
+        if group_samples:
+            samples.extend(group_samples)
+            round_stats.extend(group_round_stats)
+        else:
+            failed_games += len(job.seeds)
+    return samples, failed_games, round_stats
+
+
 def run_training_loop(
     config: TrainingConfig,
     metrics: MetricsLogger,
@@ -706,7 +954,22 @@ def run_training_loop(
         step = state.iteration
 
         self_play_start = time.monotonic()
-        if config.selfplay_opponent != "self":
+        pool_dir = config.opponent_pool_checkpoint_dir or config.checkpoint_dir
+        # Only draws from rng when opponent_pool_prob > 0 (short-circuit
+        # `and`) - opponent_pool_prob=0.0 (the default) must reproduce the
+        # exact self-play rng draw sequence every other branch below already
+        # relies on, not consume an extra draw for a check that can never
+        # fire.
+        use_pool = (
+            config.opponent_pool_prob > 0.0 and pool_dir is not None and rng.random() < config.opponent_pool_prob
+        )
+        opponent_checkpoint_path = (
+            sample_pool_checkpoint(pool_dir, config.opponent_pool_window, rng) if use_pool else None
+        )
+        if opponent_checkpoint_path is not None:
+            pool_jobs = _build_pool_jobs(config, rng, failure_log_path, opponent_checkpoint_path)
+            samples, failed_games, round_stats = run_self_play_iteration_vs_pool(net, config, pool_jobs)
+        elif config.selfplay_opponent != "self":
             vs_bot_jobs = _build_vs_bot_jobs(config, rng, failure_log_path)
             samples, failed_games, round_stats = run_self_play_iteration_vs_bot(net, config, vs_bot_jobs)
         elif config.selfplay_batch_size <= 1:
@@ -782,6 +1045,42 @@ def run_training_loop(
                 "eval/avg_points_vs_heuristic": eval_result.avg_points,
                 "eval/seconds": time.monotonic() - eval_start,
             }
+
+            if config.eval_checkpoint_path is not None:
+                # Purely informational - never feeds gate_on_eval, which stays
+                # anchored to win_rate_vs_heuristic above. This checkpoint is a
+                # fixed reference point (unlike the heuristic bot, it doesn't
+                # get easier relative to the net over the run), so it stays a
+                # meaningful trend even once win_rate_vs_heuristic saturates -
+                # see eval_checkpoint_path's docstring.
+                checkpoint_eval_start = time.monotonic()
+                checkpoint_num_simulations = (
+                    config.eval_checkpoint_num_simulations
+                    if config.eval_checkpoint_num_simulations is not None
+                    else config.eval_num_simulations
+                )
+                checkpoint_eval_result = evaluate_vs_decider(
+                    net,
+                    config.eval_checkpoint_path,
+                    config.eval_games,
+                    num_simulations=checkpoint_num_simulations,
+                    opponent_num_simulations=checkpoint_num_simulations,
+                    c_puct=config.c_puct,
+                    network_kwargs=config.network_kwargs,
+                    max_steps=config.max_steps_per_episode,
+                    round_max_steps=config.round_max_steps,
+                    max_rounds=config.max_rounds,
+                    seed=config.seed,
+                    batch_size=config.eval_batch_size,
+                )
+                eval_log.update(
+                    {
+                        "eval/win_rate_vs_checkpoint": checkpoint_eval_result.win_rate,
+                        "eval/avg_rank_vs_checkpoint": checkpoint_eval_result.avg_rank,
+                        "eval/avg_points_vs_checkpoint": checkpoint_eval_result.avg_points,
+                        "eval/checkpoint_seconds": time.monotonic() - checkpoint_eval_start,
+                    }
+                )
 
             if config.gate_on_eval:
                 if eval_result.win_rate >= best_win_rate - config.gate_tolerance:
