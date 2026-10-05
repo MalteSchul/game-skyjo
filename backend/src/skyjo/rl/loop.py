@@ -233,12 +233,22 @@ class TrainingConfig:
     # stays a meaningful signal even after the net starts always beating the
     # heuristic bot - until the net similarly surpasses this checkpoint too,
     # at which point it saturates the same way and needs manually swapping
-    # to a later one. Reuses eval_games/eval_num_simulations/eval_batch_size
-    # - no separate knobs, since this is the same kind of periodic diagnostic
-    # as the heuristic eval it runs alongside (eval_workers is not reused:
+    # to a later one. Reuses eval_games/eval_batch_size - no separate knobs
+    # for those, since this is the same kind of periodic diagnostic as the
+    # heuristic eval it runs alongside (eval_workers is not reused either:
     # evaluate_vs_decider has no multiprocess sharding yet, see its
-    # docstring).
+    # docstring). eval_num_simulations *is* overridable below, though - see
+    # eval_checkpoint_num_simulations.
     eval_checkpoint_path: str | None = None
+    # None (default) = reuse eval_num_simulations, same as every other
+    # knob above. Worth overriding independently because this eval, unlike
+    # evaluate_vs_heuristic, runs a real MCTS search on *both* sides (the
+    # heuristic bot doesn't search at all) with no workers to parallelize
+    # across - roughly an order of magnitude slower wall-clock than the
+    # heuristic eval at the same simulation count in practice, so lowering
+    # just this one is the cheapest way to bring that back down without
+    # also cutting the heuristic eval's own (already-cheap) fidelity.
+    eval_checkpoint_num_simulations: int | None = None
 
     def __post_init__(self) -> None:
         if self.iterations <= 0:
@@ -302,6 +312,8 @@ class TrainingConfig:
             raise ValueError("TrainingConfig: opponent_pool_num_simulations must be >= 0 if given")
         if self.eval_checkpoint_path is not None and not (self.min_players == self.max_players == 2):
             raise ValueError("TrainingConfig: eval_checkpoint_path requires min_players == max_players == 2")
+        if self.eval_checkpoint_num_simulations is not None and self.eval_checkpoint_num_simulations < 0:
+            raise ValueError("TrainingConfig: eval_checkpoint_num_simulations must be >= 0 if given")
 
 
 @dataclass
@@ -1042,12 +1054,17 @@ def run_training_loop(
                 # meaningful trend even once win_rate_vs_heuristic saturates -
                 # see eval_checkpoint_path's docstring.
                 checkpoint_eval_start = time.monotonic()
+                checkpoint_num_simulations = (
+                    config.eval_checkpoint_num_simulations
+                    if config.eval_checkpoint_num_simulations is not None
+                    else config.eval_num_simulations
+                )
                 checkpoint_eval_result = evaluate_vs_decider(
                     net,
                     config.eval_checkpoint_path,
                     config.eval_games,
-                    num_simulations=config.eval_num_simulations,
-                    opponent_num_simulations=config.eval_num_simulations,
+                    num_simulations=checkpoint_num_simulations,
+                    opponent_num_simulations=checkpoint_num_simulations,
                     c_puct=config.c_puct,
                     network_kwargs=config.network_kwargs,
                     max_steps=config.max_steps_per_episode,

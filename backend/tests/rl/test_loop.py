@@ -72,6 +72,7 @@ def test_training_config_accepts_valid_values():
         {"opponent_pool_prob": 1.1},
         {"opponent_pool_window": 0},
         {"opponent_pool_num_simulations": -1},
+        {"eval_checkpoint_num_simulations": -1},
     ],
 )
 def test_training_config_rejects_invalid_values(overrides):
@@ -684,9 +685,13 @@ def test_run_training_loop_logs_eval_metrics_vs_checkpoint_when_configured(tmp_p
         run_training_loop(config, metrics)
 
     assert len(calls) == 1
-    checkpoint_path, num_games, _kwargs = calls[0]
+    checkpoint_path, num_games, kwargs = calls[0]
     assert checkpoint_path == "some/checkpoint.pt"
     assert num_games == 5
+    # eval_checkpoint_num_simulations wasn't set, so this must fall back to
+    # eval_num_simulations for both sides rather than some other default.
+    assert kwargs["num_simulations"] == config.eval_num_simulations
+    assert kwargs["opponent_num_simulations"] == config.eval_num_simulations
 
     lines = [json.loads(line) for line in (tmp_path / "logs" / "metrics.jsonl").read_text().splitlines()]
     eval_records = [line for line in lines if "eval/win_rate_vs_checkpoint" in line]
@@ -696,6 +701,27 @@ def test_run_training_loop_logs_eval_metrics_vs_checkpoint_when_configured(tmp_p
     assert eval_records[0]["eval/avg_points_vs_checkpoint"] == 30.0
     # win_rate_vs_heuristic must still be logged alongside it, unaffected.
     assert "eval/win_rate_vs_heuristic" in eval_records[0]
+
+
+def test_run_training_loop_eval_checkpoint_num_simulations_overrides_eval_num_simulations(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        loop_module,
+        "evaluate_vs_decider",
+        lambda net, checkpoint_path, num_games, **kwargs: calls.append(kwargs)
+        or MatchEvalResult(games_played=num_games, win_rate=0.5, avg_rank=0.5, avg_points=50.0),
+    )
+    config = _tiny_config(
+        iterations=1, eval_every=1, eval_num_simulations=20, eval_checkpoint_path="some/checkpoint.pt",
+        eval_checkpoint_num_simulations=3,
+    )
+
+    with MetricsLogger(tmp_path / "logs") as metrics:
+        run_training_loop(config, metrics)
+
+    assert len(calls) == 1
+    assert calls[0]["num_simulations"] == 3
+    assert calls[0]["opponent_num_simulations"] == 3
 
 
 def test_run_training_loop_gate_on_eval_ignores_the_checkpoint_eval_result(tmp_path, monkeypatch):
